@@ -30,16 +30,27 @@ function ruleBodies(css: string, selector: string): string[] {
 }
 
 /**
- * The declaration that actually wins for a property: the LAST one across all bodies of
- * the selector.
+ * The last declaration of a property across all bodies of an exact selector.
  *
- * Concatenating bodies and taking the first match is what a reviewer correctly called a
- * false negative: a second rule for the same selector, added later with a wrong value,
- * wins the cascade while the first (correct) declaration still satisfies the assertion.
- * Reading the last occurrence is what makes these tests describe the rendered result.
+ * Two false negatives, both found by review and both reproduced before being closed:
+ *
+ * 1. Concatenating bodies and taking the FIRST match let a second rule for the same
+ *    selector, added later with a wrong value, win the cascade while the earlier correct
+ *    declaration still satisfied the assertion. Hence reading the last occurrence.
+ * 2. An unanchored property name matched inside a CUSTOM PROPERTY, so
+ *    `max-height: calc(100dvh - 261px); --max-height: calc(100dvh - 260px)` passed with
+ *    the rendered cap wrong. Hence the boundary below: the property must start the body
+ *    or follow `;`/newline, and must not be preceded by `-`.
+ *
+ * Scope, stated because the previous comment overclaimed: this is source-order within one
+ * exact selector string. It does not model `!important`, competing selectors of different
+ * specificity, or @-rule nesting. For these two rules that is enough - each is declared
+ * once, and the cascade question that matters (`.notice` beating `.action-toast`) is
+ * asserted separately below.
  */
 function effectiveDeclaration(css: string, selector: string, property: string): string {
-  const pattern = new RegExp(property + "\\s*:\\s*([^;}]+)", "g");
+  const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp("(?:^|[;{\\n])\\s*" + escaped + "\\s*:\\s*([^;}]+)", "g");
   let winner: string | null = null;
   for (const body of ruleBodies(css, selector)) {
     for (const m of body.matchAll(pattern)) winner = m[1].trim();
@@ -98,4 +109,34 @@ test("the toast width cap outranks the later .notice rule", async () => {
   const compoundIndex = css.search(/(^|\n)\s*\.action-toast\.notice\s*\{/);
   expect(compoundIndex).toBeGreaterThanOrEqual(0);
   expect(noticeIndex).toBeGreaterThan(compoundIndex);
+});
+
+test("the cap reader is not fooled by a custom property or an earlier duplicate", () => {
+  // Both of these are regressions, not hypotheticals: each passed a previous revision of
+  // this file while the rendered cap was wrong, and each was reproduced against the real
+  // stylesheet before being closed. The fixture is inline so the guard is testable without
+  // touching gui/src/styles.css.
+
+  // A custom property whose NAME contains the property being read. Reading `max-height`
+  // without a declaration boundary matched `--max-height` and reported the good value
+  // while the real declaration was 261px.
+  const masked = [
+    ".logs-table-wrap {",
+    "  max-height: calc(100dvh - 261px);",
+    "  --max-height: calc(100dvh - 260px);",
+    "}",
+  ].join("\n");
+  expect(effectiveDeclaration(masked, ".logs-table-wrap", "max-height")).toBe("calc(100dvh - 261px)");
+
+  // A later duplicate rule for the same selector wins the cascade. Taking the FIRST match
+  // reported the earlier correct value.
+  const duplicated = [
+    ".action-toast.notice { max-width: min(480px, calc(100vw - 48px)); }",
+    ".action-toast.notice { max-width: min(200px, calc(100vw - 8px)); }",
+  ].join("\n");
+  expect(effectiveDeclaration(duplicated, ".action-toast.notice", "max-width")).toBe("min(200px, calc(100vw - 8px))");
+
+  // A property that genuinely is not there must throw rather than silently report a
+  // neighbouring declaration.
+  expect(() => effectiveDeclaration(".logs-table-wrap { overflow-y: auto; }", ".logs-table-wrap", "max-height")).toThrow();
 });
