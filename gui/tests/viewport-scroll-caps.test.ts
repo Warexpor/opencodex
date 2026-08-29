@@ -30,7 +30,8 @@ function ruleBodies(css: string, selector: string): string[] {
 }
 
 /**
- * The last declaration of a property across all bodies of an exact selector.
+ * The last *textual* declaration of a property across all bodies of an exact selector,
+ * matched on the property's canonical lowercase spelling.
  *
  * Two false negatives, both found by review and both reproduced before being closed:
  *
@@ -42,17 +43,29 @@ function ruleBodies(css: string, selector: string): string[] {
  *    the rendered cap wrong. Hence the boundary below: the property must start the body
  *    or follow `;`/newline, and must not be preceded by `-`.
  *
- * Scope, stated because the previous comment overclaimed: this is source-order within one
- * exact selector string. It does not model `!important`, competing selectors of different
- * specificity, or @-rule nesting. For these two rules that is enough - each is declared
- * once, and the cascade question that matters (`.notice` beating `.action-toast`) is
- * asserted separately below.
+ * CSS property names are case-insensitive, and an identifier may be written with escapes
+ * (`max\\2d height` is `max-height`). A case-sensitive literal match therefore reported the
+ * wrong winner when the real declaration used `MAX-HEIGHT`. Matching is now case-insensitive,
+ * and an escape in the property name is rejected outright rather than silently skipped:
+ * nothing in this stylesheet writes one, so its appearance means the oracle no longer
+ * understands the file and should fail loudly instead of guessing.
+ *
+ * Scope, stated because an earlier version of this comment overclaimed: this is source
+ * order within one exact selector string. It does not model `!important`, competing
+ * selectors of different specificity, or @-rule nesting. For these two rules that is
+ * enough - each is declared once, and the cascade question that matters (`.notice` beating
+ * a single-class `.action-toast`) is asserted separately below.
  */
 function effectiveDeclaration(css: string, selector: string, property: string): string {
   const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp("(?:^|[;{\\n])\\s*" + escaped + "\\s*:\\s*([^;}]+)", "g");
+  const pattern = new RegExp("(?:^|[;{\\n])\\s*" + escaped + "\\s*:\\s*([^;}]+)", "gi");
   let winner: string | null = null;
   for (const body of ruleBodies(css, selector)) {
+    // An escaped identifier would need CSS unescaping to compare; refuse rather than
+    // report a value this reader cannot prove is the winner.
+    if (/\\[0-9a-fA-F]/.test(body)) {
+      throw new Error("escaped property identifier in " + selector + "; this reader cannot resolve it");
+    }
     for (const m of body.matchAll(pattern)) winner = m[1].trim();
   }
   if (winner === null) throw new Error("property not found: " + selector + " { " + property + " }");
@@ -139,4 +152,23 @@ test("the cap reader is not fooled by a custom property or an earlier duplicate"
   // A property that genuinely is not there must throw rather than silently report a
   // neighbouring declaration.
   expect(() => effectiveDeclaration(".logs-table-wrap { overflow-y: auto; }", ".logs-table-wrap", "max-height")).toThrow();
+});
+
+test("the cap reader survives case variants and refuses escaped identifiers", () => {
+  // CSS property names are case-insensitive, so `MAX-HEIGHT` is a real declaration and won
+  // the cascade while a case-sensitive reader reported the earlier lowercase value. Both of
+  // these were demonstrated in a browser before being closed here.
+  const shouted = [
+    ".logs-table-wrap {",
+    "  max-height: calc(100dvh - 260px);",
+    "  MAX-HEIGHT: calc(100dvh - 261px);",
+    "}",
+  ].join("\n");
+  expect(effectiveDeclaration(shouted, ".logs-table-wrap", "max-height")).toBe("calc(100dvh - 261px)");
+
+  // An escaped identifier (`max\\2d height` is `max-height`) would need CSS unescaping to
+  // compare. Rather than skip it and report a value it cannot prove is the winner, the
+  // reader fails loudly - nothing in this stylesheet writes one.
+  const escapedIdent = ".logs-table-wrap { max-height: calc(100dvh - 260px); max\\2d height: calc(100dvh - 261px); }";
+  expect(() => effectiveDeclaration(escapedIdent, ".logs-table-wrap", "max-height")).toThrow(/escaped/);
 });

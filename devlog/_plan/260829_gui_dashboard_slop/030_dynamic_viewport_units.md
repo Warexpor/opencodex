@@ -14,7 +14,8 @@
 
 ## Defect
 
-`.logs-table-wrap` in `gui/src/styles.css` (line 2011 as shipped):
+`.logs-table-wrap` in `gui/src/styles.css` — **as it was before the fix**; the
+rule now sits at line 2011 and carries `100dvh`:
 
 ```css
 .logs-table-wrap { max-height: calc(100vh - 260px); }
