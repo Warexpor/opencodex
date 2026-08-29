@@ -60,6 +60,7 @@ import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { assertNotRealHomeUnderTest } from "./lib/test-home-guard";
 import { providerDestinationConfigError } from "./lib/destination-policy";
 import { redactSecretString } from "./lib/redact";
+import { configureSocks5Fetch } from "./lib/proxy-env";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import { MODEL_ALIAS_PATTERN } from "./providers/default-aliases";
 import { MODEL_DISCOVERY_MAX_MODELS } from "./providers/model-discovery-limits";
@@ -3595,10 +3596,10 @@ function warnProxyConfigDiscardOnce(kind: "proxy" | "noProxy" | "noProxyElements
 }
 
 /**
- * Mirror `config.proxy` into Bun outbound-proxy env vars. HTTP(S) URLs go to
- * HTTP_PROXY/HTTPS_PROXY when those are unset. SOCKS URLs (`socks5://…`) go to
- * ALL_PROXY and clear inherited HTTP(S)_PROXY in this process so fetch does not
- * HTTP-CONNECT a SOCKS listener. Loopback is always merged into NO_PROXY.
+ * Mirror `config.proxy` into outbound-proxy env vars. HTTP(S) URLs go to
+ * HTTP_PROXY/HTTPS_PROXY when those are unset. SOCKS5 URLs go to ALL_PROXY,
+ * clear inherited HTTP(S)_PROXY, and install the explicit SOCKS5 fetch wrapper.
+ * Loopback is always merged into NO_PROXY.
  */
 export function applyProxyEnv(config: OcxConfig): void {
   applyProxyEnvWith(config);
@@ -3619,6 +3620,7 @@ export function applyProxyEnvWith(
   let proxy = typeof rawProxy === "string" ? resolveEnvValue(rawProxy) : undefined;
   if (!proxy) {
     if (rawProxy !== undefined) warnProxyConfigDiscardOnce("proxy");
+    configureSocks5Fetch();
     return;
   }
   if (proxy.trim().toLowerCase() === "auto") {
@@ -3647,7 +3649,10 @@ export function applyProxyEnvWith(
     }
   }
   if (proxy) {
-    if (/^(socks5h?|socks4a?):\/\//i.test(proxy.trim())) {
+    if (/^socks/i.test(proxy.trim()) && !/^socks5h?:\/\//i.test(proxy.trim())) {
+      throw new Error("Only SOCKS5 proxy URLs are supported; use socks5://host:port");
+    }
+    if (/^socks5h?:\/\//i.test(proxy.trim())) {
       for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"] as const) {
         delete process.env[key];
       }
@@ -3687,6 +3692,7 @@ export function applyProxyEnvWith(
     }
   }
   process.env.NO_PROXY = entries.join(",");
+  configureSocks5Fetch();
 }
 
 function warnConfigRepaired(configPath: string, error: z.ZodError): void {

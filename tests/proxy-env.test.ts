@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { applyProxyEnv } from "../src/config";
+import { configureSocks5Fetch } from "../src/lib/proxy-env";
 import type { OcxConfig } from "../src/types";
 
 const PROXY_ENV_KEYS = [
@@ -29,6 +30,7 @@ afterEach(() => {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
   }
+  configureSocks5Fetch();
 });
 
 function configWithProxy(proxy?: string, noProxy?: string | string[]): OcxConfig {
