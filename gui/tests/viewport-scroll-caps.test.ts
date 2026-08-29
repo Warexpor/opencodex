@@ -60,10 +60,15 @@ function effectiveDeclaration(css: string, selector: string, property: string): 
   const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp("(?:^|[;{\\n])\\s*" + escaped + "\\s*:\\s*([^;}]+)", "gi");
   let winner: string | null = null;
+  // Only an escape in PROPERTY-NAME position defeats this reader. Scanning the whole body
+  // would also reject an escape in a value - `content: "\\2014"` is ordinary CSS - so the
+  // guard is anchored the same way the matcher is: body start or after `;`/newline, then a
+  // name containing a hex escape, then a colon.
+  const escapedName = /(?:^|[;{\n])\s*[-\w]*\\[0-9a-fA-F]/;
   for (const body of ruleBodies(css, selector)) {
-    // An escaped identifier would need CSS unescaping to compare; refuse rather than
-    // report a value this reader cannot prove is the winner.
-    if (/\\[0-9a-fA-F]/.test(body)) {
+    // An escaped identifier would need CSS unescaping to compare; refuse rather than report
+    // a value this reader cannot prove is the winner.
+    if (escapedName.test(body)) {
       throw new Error("escaped property identifier in " + selector + "; this reader cannot resolve it");
     }
     for (const m of body.matchAll(pattern)) winner = m[1].trim();
@@ -171,4 +176,17 @@ test("the cap reader survives case variants and refuses escaped identifiers", ()
   // reader fails loudly - nothing in this stylesheet writes one.
   const escapedIdent = ".logs-table-wrap { max-height: calc(100dvh - 260px); max\\2d height: calc(100dvh - 261px); }";
   expect(() => effectiveDeclaration(escapedIdent, ".logs-table-wrap", "max-height")).toThrow(/escaped/);
+});
+
+test("an escape in a VALUE is ordinary CSS and must not trip the guard", () => {
+  // The escape guard exists for property NAMES. Scanning the whole rule body would also
+  // reject `content: "\\2014"`, which is ordinary CSS and says nothing about which
+  // declaration wins - a false failure is as much a broken oracle as a false pass.
+  const valueEscape = [
+    ".logs-table-wrap {",
+    "  content: \"\\\\2014\";",
+    "  max-height: calc(100dvh - 260px);",
+    "}",
+  ].join("\n");
+  expect(effectiveDeclaration(valueEscape, ".logs-table-wrap", "max-height")).toBe("calc(100dvh - 260px)");
 });
