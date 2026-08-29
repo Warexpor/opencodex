@@ -1,15 +1,32 @@
 # 013 — Final: what shipped and what the measurement taught
 
 Supersedes the mechanism proposed in `010`/`011`/`012`. Those documents are kept
-because the failed attempts are why the shipped fix is one declaration.
+because the failed attempts are why the shipped fix is exactly these two
+declarations and not a third.
 
 ## Shipped
 
 ```css
+.dash-sidecar-row-card { align-content: start; }
 .dash-sidecar-row-card .dash-sidecar-copy .setting-hint { min-height: 3lh; }
 ```
 
-replacing `min-height: 3.9375rem` on the copy block.
+The second replaces `min-height: 3.9375rem` on the copy block.
+
+**Both are load-bearing, and each was confirmed by removing it from the shipped
+stylesheet and re-measuring the rendered page.** They fix two independent halves
+of the same symptom, which is why neither alone is enough:
+
+| shipped CSS under test | worst paired offset | what breaks |
+|------------------------|--------------------|-------------|
+| both declarations | **0.0px** | nothing |
+| `3lh` only (`align-content` back to its `stretch` default) | **27.8px** | equal copy rows, but each card spreads its own leftover space across its own wrapped lines |
+| `align-content: start` only (old `3.9375rem` band restored) | **19.5px** | lines pack from the top, but the two copy rows are unequal at ru/fr (63px vs 82.5px) |
+
+`align-content: start` fixes the *distribution* of the wrapped flex lines;
+`3lh` fixes the *height of the copy row* those lines pack against. Removing
+either one re-opens the defect, so a future maintainer must treat both as part
+of the fix.
 
 ## The defect, stated exactly
 
@@ -70,23 +87,25 @@ not the shipped page — an injected experiment sheet from a previous probe was 
 attached. The harness now strips every probe sheet before measuring, counts what
 remains, and **fails** if the count is not what the run expects.
 
-The second one is why `align-content: start` was briefly committed as the fix. It
-is not in the shipped diff: re-measured on a clean page it leaves the full 19.5px,
-because packing lines from the top does nothing when the copy rows themselves are
-unequal.
+The second one is why `align-content: start` was briefly believed to be the
+*whole* fix. Re-measured on a clean page it leaves the full 19.5px at ru/fr,
+because packing lines from the top does nothing about copy rows that are unequal
+to begin with. That is a correction of its sufficiency, not of its necessity — it
+ships, and the removal test above shows the pair drifts 27.8px without it.
 
 ## Deferred, per the audit
 
 - `020` **withdrawn.** The `0px` third track is normal `auto-fit` behaviour for a
   collapsed empty track, not a defect. Replacing `auto-fit` with a fixed two-up
   would change future three-card behaviour for no present gain.
-- `030` **reduced.** `dvw` does not subtract a classic scrollbar, so the toast fix
-  must use containing-block insets / `max-inline-size`, not a unit swap. Only
-  `.logs-table-wrap`'s `vh` → `dvh` survives.
+- `030` **reduced.** `dvw` does not subtract a classic scrollbar, so a unit swap
+  would not have fixed the toast, and the containing-block rewrite was dropped as
+  unreproducible on this surface (`innerWidth == clientWidth`, gap 0). Shipped
+  instead: `.logs-table-wrap`'s `vh` → `dvh`, and a toast `max-width` that was
+  losing the cascade to a later equal-specificity `.notice` rule.
 
 ## Evidence
 
 - Harness: `.tmp/uiux/measure.ts` (scratch, not committed)
 - Screenshots with control-row guides: before `-19.5px` / after `0px` at ru and fr, 1024
 - Regression: `gui/tests/sidecar-layout.test.ts`, red on the previous CSS (2 fail), green on this one (8 pass)
-

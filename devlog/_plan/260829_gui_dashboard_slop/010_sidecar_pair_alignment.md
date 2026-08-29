@@ -5,7 +5,7 @@ tracks, so their control rows align for any hint length in any locale.
 
 ## Current shape
 
-```
+```text
 .dash-sidecar-grid                     grid, auto-fit 2 tracks, align-items: stretch
   └─ .panel.dash-delegation-summary.dash-sidecar-row-card
        ├─ .dash-sidecar-copy            (title + hint)
@@ -41,7 +41,7 @@ the pair grid:
 Subgrid requires the card to be a grid *item* of the pair grid, but the card also
 has to be the container query root's child. Structure becomes:
 
-```
+```text
 .dash-sidecar-grid            (grid, 2 rows)
   └─ .dash-sidecar-cell       (container-type: inline-size, display: grid, rows: subgrid, span 2)
        └─ .dash-sidecar-row-card  (display: grid, rows: subgrid, span 2)
@@ -77,4 +77,3 @@ unsupported browsers keep today's approximation.
 - Locale hint signatures distinct, no unsettled cells.
 - A focused GUI test asserts the subgrid contract so a future edit that reverts
   to the band fails.
-

@@ -5,11 +5,16 @@ row tracks. Both were wrong about the mechanism. This is the record of what the
 experiments showed, kept because the failed attempts are the reason the shipped
 fix is one line.
 
-## The shipped fix
+## The fix as understood at this point
 
 ```css
 .dash-sidecar-row-card { align-content: start; }
 ```
+
+> **Superseded by `013`.** This declaration ships and is load-bearing, but it is
+> only half of the fix. The measurement below was taken with the old
+> `3.9375rem` copy band still in place, which hid the ru/fr case where the two
+> copy rows are unequal. See `013` for the shipped pair and the removal tests.
 
 Measured: worst paired offset **0.0px** (was 27.8px) across `en/ko/ru/fr/ja/zh/de/tr`
 at 1024 and 1100, plus the regime boundaries 1600/1440/1010/760/1000/992/430 on
@@ -25,10 +30,15 @@ deleting it. The decisive experiment says otherwise: with the band in place and
 therefore necessary but not sufficient — the mis-distributed thing is the wrapped
 **lines**, not the copy.
 
-So the band stays. It is load-bearing, just for a different reason than its
-comment claimed: it equalises the copy row that `align-content: start` then packs
-against. Deleting it would have re-broken the pair while the new rule kept
-measuring 0.0px at the locales that happen to wrap identically.
+So *a* copy-row floor stays: something has to equalise the copy row that
+`align-content: start` then packs against, and deleting the floor outright would
+have re-broken the pair while the new rule kept measuring 0.0px at the locales
+that happen to wrap identically.
+
+What this document gets wrong is which floor. It concludes the `3.9375rem` band
+itself is load-bearing; `013` shows the band is a two-line pixel assumption that
+fails at ru/fr, and ships `min-height: 3lh` on the hint in its place. The band is
+**not** in the shipped stylesheet.
 
 ## Why subgrid is unavailable here
 
@@ -66,7 +76,8 @@ adding it:
 - The `0px` third track is **normal** `auto-fit` behaviour for a collapsed empty
   track, not a defect. Replacing `auto-fit` with a fixed two-up would change
   future three-card behaviour for no present gain. `020` is withdrawn.
-- `dvw` does not subtract a classic scrollbar, so the toast fix must use
-  containing-block insets / `max-inline-size: 100%`, not a unit swap. Only the
-  `.logs-table-wrap` `vh` → `dvh` change survives from `030`.
-
+- `dvw` does not subtract a classic scrollbar, so a `vw` → `dvw` swap would not
+  have fixed the toast. The containing-block rewrite was then dropped too: the
+  divergence could not be reproduced here (`innerWidth == clientWidth`). What
+  shipped from `030` is the `.logs-table-wrap` `vh` → `dvh` change plus a
+  reproduced toast **specificity** fix; see `030` for both.

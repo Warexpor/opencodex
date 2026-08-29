@@ -4,7 +4,7 @@
 
 At vw ≥ 1440 both dashboard grids compute a third, zero-width column:
 
-```
+```css
 grid-template-columns: 555px 555px 0px
 ```
 
@@ -41,4 +41,3 @@ sweep, which must keep reporting STACKED at 900/430 and PAIRED at 1024+.
 - No `0px` track in either grid's computed columns at any swept width.
 - The PAIRED/STACKED pattern per width matches the baseline exactly (no
   behavioural change, only the phantom track removed).
-
