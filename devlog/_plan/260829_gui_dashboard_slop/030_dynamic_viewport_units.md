@@ -6,8 +6,11 @@
 > pass found both.
 >
 > Rules below are named by selector, not line number: the fix this document
-> describes inserted lines above the very rules it cites, so the original
-> citations (`styles.css:2003`, `:755`, `:1222`) now land on unrelated CSS.
+> describes inserted lines above the very rules it cites, so most of its original
+> citations stopped describing what they pointed at — `styles.css:2003` is now
+> `min-width: 220px` and `:1222` is a `z-index`. `:755` still lands on
+> `.action-toast`'s `max-width` by coincidence, which is why the selector is the
+> reference and the line is only a hint.
 
 ## Defect
 

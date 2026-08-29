@@ -104,9 +104,12 @@ and `.toast-notice` cap toast width with `calc(100vw - Npx)`, which ignores clas
 scrollbar width.
 
 Rules are named by selector rather than line number on purpose: the fix itself
-inserted lines above them, so every original citation (`styles.css:2003`,
-`:755`, `:1222`, `:2198`) now lands on unrelated CSS. Current locations are in
-`030` and the Outcome section below.
+inserted lines above them, so most of the original citations no longer describe
+what they pointed at. `:2003` is now `min-width: 220px`, `:1222` is the toast
+host's `z-index`, and `:2198` is `background: var(--glass-rail)`. `:755` still
+happens to land on `.action-toast`'s `max-width`, which is the point rather than a
+reprieve: one of four survived by coincidence, and nothing marks which. Current
+locations are in `030` and the Outcome section below.
 
 The probe measures this behaviourally — comparing each scroll container's
 computed cap against `visualViewport.height` — rather than grepping for the

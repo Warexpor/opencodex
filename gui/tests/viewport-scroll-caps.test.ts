@@ -18,10 +18,34 @@ function withoutComments(css: string): string {
 
 /** All bodies for a selector, which may be declared more than once. */
 function allRuleBodies(css: string, selector: string): string {
+  return ruleBodies(css, selector).join("\n");
+}
+
+/** Every body for a selector, in source order. */
+function ruleBodies(css: string, selector: string): string[] {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const matches = [...css.matchAll(new RegExp("(^|\\n)\\s*" + escaped + "\\s*\\{([^}]*)\\}", "g"))];
   if (matches.length === 0) throw new Error("rule not found: " + selector);
-  return matches.map((m) => m[2]).join("\n");
+  return matches.map((m) => m[2]);
+}
+
+/**
+ * The declaration that actually wins for a property: the LAST one across all bodies of
+ * the selector.
+ *
+ * Concatenating bodies and taking the first match is what a reviewer correctly called a
+ * false negative: a second rule for the same selector, added later with a wrong value,
+ * wins the cascade while the first (correct) declaration still satisfies the assertion.
+ * Reading the last occurrence is what makes these tests describe the rendered result.
+ */
+function effectiveDeclaration(css: string, selector: string, property: string): string {
+  const pattern = new RegExp(property + "\\s*:\\s*([^;}]+)", "g");
+  let winner: string | null = null;
+  for (const body of ruleBodies(css, selector)) {
+    for (const m of body.matchAll(pattern)) winner = m[1].trim();
+  }
+  if (winner === null) throw new Error("property not found: " + selector + " { " + property + " }");
+  return winner;
 }
 
 test("the log table caps its scroll height against the dynamic viewport", async () => {
@@ -34,8 +58,10 @@ test("the log table caps its scroll height against the dynamic viewport", async 
   // .main-inner--combos, the mobile drawer) already uses 100dvh, so this rule was the
   // outlier rather than the convention.
   // The subtrahend is locked, not just the unit: a `calc(100dvh - <anything>)` would
-  // satisfy a unit-only assertion while silently resizing the table.
-  const cap = wrap.match(/max-height:\s*calc\(\s*100dvh\s*-\s*([\d.]+)px\s*\)/);
+  // satisfy a unit-only assertion while silently resizing the table. Read from the
+  // EFFECTIVE declaration so a later duplicate rule cannot hide behind this one.
+  const effective = effectiveDeclaration(css, ".logs-table-wrap", "max-height");
+  const cap = effective.match(/^calc\(\s*100dvh\s*-\s*([\d.]+)px\s*\)$/);
   expect(cap).not.toBeNull();
   expect(Number(cap![1])).toBe(260);
   expect(wrap).not.toMatch(/max-height:\s*calc\(\s*100vh\s*-/);
@@ -49,8 +75,11 @@ test("the toast width cap outranks the later .notice rule", async () => {
   // order therefore won and a single-class `.action-toast` cap never applied - the toast
   // rendered 542px instead of its design width. Two classes is what wins the cascade, so
   // the cap must stay on the compound selector.
-  const compound = allRuleBodies(css, ".action-toast.notice");
-  const cap = compound.match(/max-width:\s*min\(\s*([\d.]+)px\s*,\s*calc\(\s*100vw\s*-\s*([\d.]+)px\s*\)\s*\)/);
+  // Again the EFFECTIVE declaration, for the same reason: a second `.action-toast.notice`
+  // rule added later with a wrong width would win the cascade while the first one still
+  // matched a first-occurrence assertion.
+  const effective = effectiveDeclaration(css, ".action-toast.notice", "max-width");
+  const cap = effective.match(/^min\(\s*([\d.]+)px\s*,\s*calc\(\s*100vw\s*-\s*([\d.]+)px\s*\)\s*\)$/);
 
   // Both halves are asserted on purpose. An earlier revision kept only the design width,
   // which dropped the viewport term and let the toast reach the screen edge at narrow
