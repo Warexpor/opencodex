@@ -1,5 +1,10 @@
 # 030 — Dynamic viewport units in scroll surfaces (wp3)
 
+> **Not shipped by this pull request.** This is the plan for a separate change to
+> `gui/src/styles.css`, implemented in the stacked child PR — not in the sidecar
+> commit this document sits beside. It is recorded here because the same audit
+> pass found both, and it is kept in `_plan` until that child lands.
+
 ## Defect
 
 `gui/src/styles.css:2003`:
