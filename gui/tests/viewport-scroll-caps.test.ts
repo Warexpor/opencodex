@@ -33,7 +33,11 @@ test("the log table caps its scroll height against the dynamic viewport", async 
   // last rows sit underneath the address bar. The rest of the shell (.app, .sidebar,
   // .main-inner--combos, the mobile drawer) already uses 100dvh, so this rule was the
   // outlier rather than the convention.
-  expect(wrap).toMatch(/max-height:\s*calc\(\s*100dvh\s*-/);
+  // The subtrahend is locked, not just the unit: a `calc(100dvh - <anything>)` would
+  // satisfy a unit-only assertion while silently resizing the table.
+  const cap = wrap.match(/max-height:\s*calc\(\s*100dvh\s*-\s*([\d.]+)px\s*\)/);
+  expect(cap).not.toBeNull();
+  expect(Number(cap![1])).toBe(260);
   expect(wrap).not.toMatch(/max-height:\s*calc\(\s*100vh\s*-/);
 });
 
@@ -51,9 +55,12 @@ test("the toast width cap outranks the later .notice rule", async () => {
   // Both halves are asserted on purpose. An earlier revision kept only the design width,
   // which dropped the viewport term and let the toast reach the screen edge at narrow
   // widths (measured left = 0 at 430px, losing the 24px inset the right side keeps).
+  // Exact values, not merely positive ones: a 1px design width or a 1px inset would pass
+  // a `> 0` check while destroying the layout. 480px is the design width and 48px is the
+  // 24px inset doubled, both measured on the rendered toast.
   expect(cap).not.toBeNull();
-  expect(Number(cap![1])).toBeGreaterThan(0);
-  expect(Number(cap![2])).toBeGreaterThan(0);
+  expect(Number(cap![1])).toBe(480);
+  expect(Number(cap![2])).toBe(48);
 
   // Guard the ordering premise itself: if `.notice` ever moved ABOVE this rule, a
   // single-class cap would start working and someone could "simplify" the compound

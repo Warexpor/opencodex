@@ -23,10 +23,12 @@ rows under the browser UI. The rest of the shell already moved to `100dvh` —
 `.app` (244), the sidebar (247), `.main-inner--combos` (411-412) and the mobile
 drawer (2213) — so this line is an outlier, not a convention.
 
-`.action-toast` (749) and `.notice` (1215) cap toast width with `calc(100vw - Npx)`. Per CSS
-Values and Units 4, `100vw` includes the classic scrollbar gutter, so a
-scrollbar-reserving platform can in principle render a cap wider than the visible
-area.
+`.action-toast` (749) and `.toast-notice` (1229) cap toast width with
+`calc(100vw - Npx)`. Per CSS Values and Units 4, `100vw` includes the classic
+scrollbar gutter, so a scrollbar-reserving platform can in principle render a cap
+wider than the visible area. (`.notice` at 1215 is a different rule: it caps with
+`var(--prose-measure)`, which is what makes it win the cascade below — it does not
+use a viewport unit at all.)
 
 A separate, *reproduced* toast defect turned up while measuring that one: the
 cap on `.action-toast` never applied at all. Every toast also carries `.notice`,
