@@ -1,3 +1,5 @@
+import { socks5Fetch } from "./socks5-fetch";
+
 export const OUTBOUND_PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] as const;
 export const PROXY_ENV_KEYS = [...OUTBOUND_PROXY_ENV_KEYS, "NO_PROXY"] as const;
 
@@ -82,6 +84,67 @@ export function outboundProxyConfigured(
   env: ProxyEnvMap = process.env,
 ): boolean {
   return OUTBOUND_PROXY_ENV_KEYS.some(key => proxyEnvPresent(key, env));
+}
+
+export function isSocks5ProxyUrl(proxy: string): boolean {
+  return /^socks5h?:\/\//i.test(proxy.trim());
+}
+
+/** Only ALL_PROXY / all_proxy; first value that is socks5(h). */
+export function socks5ProxyFromEnv(env: ProxyEnvMap = process.env): string | undefined {
+  const candidates = [env.ALL_PROXY, env.all_proxy];
+  return candidates.find(value => typeof value === "string" && isSocks5ProxyUrl(value));
+}
+
+export function configuredOutboundFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  fallback?: typeof globalThis.fetch,
+): Promise<Response> {
+  const base = fallback ?? (globalThis.fetch === installedFetch ? nativeFetch : globalThis.fetch);
+  const proxy = socks5ProxyFromEnv();
+  let url: URL;
+  try {
+    url = new URL(input instanceof Request ? input.url : String(input));
+  } catch {
+    return base!(input, init);
+  }
+  if (proxy && (url.protocol === "http:" || url.protocol === "https:") && !noProxyMatches(url)) {
+    return socks5Fetch(input, init, proxy);
+  }
+  return base!(input, init);
+}
+
+type FetchWithPreconnect = typeof globalThis.fetch & {
+  preconnect?: typeof globalThis.fetch.preconnect;
+};
+
+let nativeFetch: FetchWithPreconnect | undefined;
+let installedFetch: FetchWithPreconnect | undefined;
+
+/** Install/uninstall globalThis.fetch wrapper when ALL_PROXY is socks5. Preserves .preconnect. */
+export function configureSocks5Fetch(): void {
+  if (globalThis.fetch !== installedFetch) {
+    nativeFetch = globalThis.fetch as FetchWithPreconnect;
+    installedFetch = undefined;
+  }
+  const proxy = socks5ProxyFromEnv();
+  if (!proxy) {
+    if (installedFetch && globalThis.fetch === installedFetch && nativeFetch) globalThis.fetch = nativeFetch;
+    installedFetch = undefined;
+    return;
+  }
+  if (installedFetch && globalThis.fetch === installedFetch) return;
+  const base = nativeFetch ?? globalThis.fetch as FetchWithPreconnect;
+  nativeFetch = base;
+  const wrapped = Object.assign(
+    (input: RequestInfo | URL, init?: RequestInit) => {
+      return configuredOutboundFetch(input, init, base);
+    },
+    { preconnect: base.preconnect?.bind(base) },
+  ) as FetchWithPreconnect;
+  installedFetch = wrapped;
+  globalThis.fetch = wrapped;
 }
 
 /**
