@@ -70,6 +70,30 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
     expect(result.instructions).toBe(stable);
     expect(result.dynamicNotice).toBe(`${latest}\n\n${TASKCREATE_NUDGE}`);
   });
+
+  test("inline documentation of total_tokens tags stays in instructions", () => {
+    const docs = "The harness may emit a <total_tokens>123</total_tokens> footer; do not invent one.";
+    const result = stabilizeClaudeInstructionsForPromptCache(docs);
+    expect(result.instructions).toBe(docs);
+    expect(result.dynamicNotice).toBeNull();
+  });
+
+  test("TaskCreate mentioned in docs is not treated as the harness nudge", () => {
+    const docs = "The task tools haven't been used recently. You may mention TaskCreate in docs without the reminder.";
+    const result = stabilizeClaudeInstructionsForPromptCache(docs);
+    expect(result.instructions).toBe(docs);
+    expect(result.dynamicNotice).toBeNull();
+  });
+
+  test("docs plus a real footer keep the docs and move only the latest footer", () => {
+    const docs = "Describe <total_tokens>0</total_tokens> in the protocol guide.";
+    const latest = footer(8000);
+    const result = stabilizeClaudeInstructionsForPromptCache(
+      [docs, footer(1), latest].join("\n\n"),
+    );
+    expect(result.instructions).toBe(docs);
+    expect(result.dynamicNotice).toBe(latest);
+  });
 });
 
 describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
