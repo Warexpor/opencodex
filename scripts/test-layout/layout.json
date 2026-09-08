@@ -928,7 +928,6 @@
     "opencode-go-muse-vision.test.ts": "providers",
     "opencode-go-quota.test.ts": "providers",
     "opencode-go-session-header.test.ts": "providers",
-    "opencode-go-session.test.ts": "providers",
     "opencode-zen-deepseek-reasoning.test.ts": "providers",
     "opencode-zen-rate-limit.test.ts": "providers",
     "openrouter-provider-routing.test.ts": "providers",
