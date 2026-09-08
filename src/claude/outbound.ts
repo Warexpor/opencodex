@@ -5,8 +5,9 @@
  *  - Transport-only `ping` events may appear at any point, including before
  *    message_start. Semantic framing stays message_start ->
  *    (content_block_start -> deltas -> content_block_stop)* -> message_delta -> message_stop.
- *  - thinking blocks get thinking_delta(s) then ONE synthetic signature_delta just
- *    before content_block_stop (CCR precedent: Claude Code does not verify signatures).
+ *  - thinking blocks get thinking_delta(s) then ONE signature_delta just before
+ *    content_block_stop. The signature is an ocxr1 envelope carrying the Responses
+ *    reasoning wire snapshot so inbound can restore it (muse-spark prefix cache).
  *  - message_delta.usage is cumulative; message_start embeds a full message snapshot.
  *  - errors: {type:"error", error:{type,message}}; may arrive mid-stream after HTTP 200.
  */
@@ -20,6 +21,7 @@ import {
   type TranslatorBudget,
 } from "../lib/translator-budget";
 import { sseFieldOffset, sseFieldValue } from "../lib/sse-decoder";
+import { encodeResponsesReasoningSignature } from "../responses/reasoning-envelope";
 
 type Rec = Record<string, unknown>;
 
@@ -214,6 +216,10 @@ interface OpenBlock {
   callId?: string;
   /** Last fixed-size reasoning identity (item + summary/content index) seen by this block. */
   reasoningPartKey?: string;
+  /** Accumulated thinking text for ocxr1 fallback when output_item.done lacks a full item. */
+  thinkingText?: string;
+  /** Completed Responses reasoning item from output_item.done, for wire snapshot signatures. */
+  reasoningWire?: Rec;
 }
 
 /** Streaming: Responses SSE bytes -> Anthropic Messages SSE bytes. */
@@ -280,6 +286,16 @@ export function responsesSseToAnthropicSse(
           } catch { /* controller torn down; the read loop is ending anyway */ }
         }, pingIntervalMs);
       }
+      // muse-spark (and similar) often emit function_call / output_text *before*
+      // response.output_item.done for the preceding reasoning item. Closing the thinking
+      // block at that moment freezes a text-only ocxr1 signature and drops
+      // encrypted_content when done arrives later — inbound then cannot restore the
+      // wire item, and Meta's prefix cache sticks at tools+instructions (~3.5k).
+      // Hold those frames until reasoning done (or a terminal event forces resolve).
+      const pendingFrames: Array<{ eventName: string; data: Rec }> = [];
+      let drainingPending = false;
+      const thinkingAwaitingWire = (): boolean =>
+        !!open && open.kind === "thinking" && !open.reasoningWire;
       const closeOpenBlock = () => {
         if (!open) return;
         if (open.kind === "tool_use" && open.bufferWebSearchArgs && !open.webSearchArgsEmitted) {
@@ -296,10 +312,17 @@ export function responsesSseToAnthropicSse(
           open.webSearchArgsEmitted = true;
         }
         if (open.kind === "thinking") {
-          // Synthetic signature: Claude Code accepts it (003 E6); inbound drops replays anyway.
+          // ocxr1 wire snapshot (or text fallback) — never Date.now(); inbound restores this
+          // as a Responses reasoning item so muse-spark prefix cache can grow across turns.
+          const signature = open.reasoningWire
+            ? encodeResponsesReasoningSignature(open.reasoningWire, open.thinkingText)
+            : encodeResponsesReasoningSignature(
+              { type: "reasoning" },
+              open.thinkingText ?? "",
+            );
           emit("content_block_delta", {
             type: "content_block_delta", index: open.index,
-            delta: { type: "signature_delta", signature: `ocx${Date.now()}` },
+            delta: { type: "signature_delta", signature },
           });
         }
         emit("content_block_stop", { type: "content_block_stop", index: open.index });
@@ -316,6 +339,18 @@ export function responsesSseToAnthropicSse(
           : { type: "thinking", thinking: "", signature: "" };
         emit("content_block_start", { type: "content_block_start", index, content_block: contentBlock });
         open = { kind, index };
+      };
+      const flushPendingFrames = () => {
+        if (drainingPending) return;
+        drainingPending = true;
+        try {
+          while (pendingFrames.length > 0) {
+            const next = pendingFrames.shift()!;
+            handleFrame(next.eventName, next.data);
+          }
+        } finally {
+          drainingPending = false;
+        }
       };
       const finish = (stopReason: string, usage: unknown) => {
         if (terminated) return;
@@ -364,6 +399,31 @@ export function responsesSseToAnthropicSse(
       };
 
       const handleFrame = (eventName: string, data: Rec) => {
+        if (!drainingPending && thinkingAwaitingWire()) {
+          const item = isRec(data.item) ? data.item : null;
+          const isReasoningDone = eventName === "response.output_item.done" && item?.type === "reasoning";
+          const isReasoningDelta =
+            eventName === "response.reasoning_summary_text.delta"
+            || eventName === "response.reasoning_text.delta";
+          const isTerminal =
+            eventName === "response.completed"
+            || eventName === "response.incomplete"
+            || eventName === "response.failed";
+          if (isTerminal) {
+            // No wire arrived — close with text fallback, then drain held tool/text frames
+            // before the terminal handler runs.
+            closeOpenBlock();
+            flushPendingFrames();
+          } else if (
+            eventName !== "response.heartbeat"
+            && eventName !== "response.created"
+            && !isReasoningDone
+            && !isReasoningDelta
+          ) {
+            pendingFrames.push({ eventName, data });
+            return;
+          }
+        }
         switch (eventName) {
           case "response.created":
             // Transport prelude only. Start Anthropic framing on semantic output or completion.
@@ -400,17 +460,26 @@ export function responsesSseToAnthropicSse(
                 type: "content_block_delta", index: open!.index,
                 delta: { type: "thinking_delta", thinking: "\n\n" },
               });
+              open!.thinkingText = (open!.thinkingText ?? "") + "\n\n";
             }
             open!.reasoningPartKey = partKey;
             emit("content_block_delta", {
               type: "content_block_delta", index: open!.index,
               delta: { type: "thinking_delta", thinking: data.delta },
             });
+            open!.thinkingText = (open!.thinkingText ?? "") + data.delta;
             break;
           }
           case "response.output_item.added": {
             const item = isRec(data.item) ? data.item : null;
-            if (!item || item.type !== "function_call") break;
+            if (!item) break;
+            // Encrypted-only reasoning never emits summary/content deltas; open the thinking
+            // block on added so output_item.done can attach the wire snapshot.
+            if (item.type === "reasoning") {
+              ensureBlock("thinking");
+              break;
+            }
+            if (item.type !== "function_call") break;
             ensureStarted();
             closeOpenBlock();
             sawToolUse = true;
@@ -499,7 +568,20 @@ export function responsesSseToAnthropicSse(
               if (pair.completed) webSearchRequests++;
               break;
             }
-            if (!open) break;
+            if (!open) {
+              // Encrypted-only (or late) reasoning done with no open block — still emit a
+              // thinking block so inbound can restore the wire on the next turn.
+              if (item.type === "reasoning"
+                && (typeof item.encrypted_content === "string"
+                  || Array.isArray(item.summary)
+                  || Array.isArray(item.content))) {
+                ensureBlock("thinking");
+                open!.reasoningWire = item;
+                closeOpenBlock();
+                flushPendingFrames();
+              }
+              break;
+            }
             // Close the matching open block (message/reasoning items close implicitly on
             // the next block; function_call items must close here so tool input parses).
             if (open.kind === "tool_use" && item.type === "function_call") {
@@ -519,7 +601,11 @@ export function responsesSseToAnthropicSse(
               closeOpenBlock();
             }
             else if (open.kind === "text" && item.type === "message") closeOpenBlock();
-            else if (open.kind === "thinking" && item.type === "reasoning") closeOpenBlock();
+            else if (open.kind === "thinking" && item.type === "reasoning") {
+              open.reasoningWire = item;
+              closeOpenBlock();
+              flushPendingFrames();
+            }
             break;
           }
           case "response.completed": {
@@ -756,8 +842,13 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
             if (isRec(s) && typeof s.text === "string" && s.text.length > 0) parts.push(s.text);
           }
         }
-        if (parts.length > 0) {
-          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: `ocx${Date.now()}` });
+        if (parts.length > 0 || typeof raw.encrypted_content === "string") {
+          const thinking = parts.join("\n\n");
+          content.push({
+            type: "thinking",
+            thinking,
+            signature: encodeResponsesReasoningSignature(raw, thinking),
+          });
         }
         break;
       }

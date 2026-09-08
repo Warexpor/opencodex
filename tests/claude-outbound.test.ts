@@ -8,6 +8,7 @@ import {
   responsesSseToAnthropicSse as responsesSseToAnthropicSseProduction,
   sanitizeWebSearchInput,
 } from "../src/claude/outbound";
+import { decodeReasoningEnvelope } from "../src/responses/reasoning-envelope";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
 import {
   TRANSLATOR_MAX_CALL_ARGUMENT_BYTES,
@@ -229,11 +230,12 @@ describe("claude outbound SSE", () => {
     expect(start.type).toBe("message_start");
     expect(start.message).toMatchObject({ type: "message", role: "assistant", content: [], model: "claude-ocx-test", stop_reason: null });
 
-    // thinking block: index 0, thinking_delta then synthetic signature_delta before stop
+    // thinking block: index 0, thinking_delta then ocxr1 signature_delta before stop
     expect(events[2].data.content_block).toEqual({ type: "thinking", thinking: "", signature: "" });
     expect(events[3].data.delta).toEqual({ type: "thinking_delta", thinking: "hmm" });
     expect(events[4].data.delta.type).toBe("signature_delta");
-    expect(events[4].data.delta.signature.length).toBeGreaterThan(0);
+    expect(events[4].data.delta.signature.startsWith("ocxr1:")).toBe(true);
+    expect(events[4].data.delta.signature).not.toMatch(/^ocx\d+$/);
     expect(events[5].data).toEqual({ type: "content_block_stop", index: 0 });
 
     // text block: index 1
@@ -252,6 +254,67 @@ describe("claude outbound SSE", () => {
     // monotonic block indexes
     const startIndexes = events.filter(e => e.name === "content_block_start").map(e => e.data.index);
     expect(startIndexes).toEqual([0, 1, 2]);
+  });
+
+  test("tool call before reasoning done keeps encrypted_content in the thinking signature", async () => {
+    const blob = "gAAAAAB-muse-encrypted-reasoning-blob";
+    const upstream = [
+      sse("response.created", { response: { id: "resp_1", status: "in_progress" } }),
+      sse("response.output_item.added", { output_index: 0, item: { type: "reasoning", id: "rs_1" } }),
+      sse("response.reasoning_summary_text.delta", { item_id: "rs_1", output_index: 0, summary_index: 0, delta: "plan" }),
+      // muse often starts the tool before reasoning output_item.done (encrypted_content).
+      sse("response.output_item.added", {
+        output_index: 1,
+        item: { type: "function_call", id: "fc_1", call_id: "toolu_1", name: "Bash", arguments: "", status: "in_progress" },
+      }),
+      sse("response.function_call_arguments.delta", { item_id: "fc_1", output_index: 1, delta: "{\"command\":\"ls\"}" }),
+      sse("response.output_item.done", {
+        output_index: 0,
+        item: {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [{ type: "summary_text", text: "plan" }],
+          encrypted_content: blob,
+        },
+      }),
+      sse("response.output_item.done", {
+        output_index: 1,
+        item: { type: "function_call", id: "fc_1", call_id: "toolu_1", name: "Bash", arguments: "{\"command\":\"ls\"}" },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: { input_tokens: 10, output_tokens: 5 } } }),
+    ].join("");
+
+    const msg = await collectAnthropicMessage(responsesSseToAnthropicSse(streamFrom(upstream), "m"), "m") as Record<string, any>;
+    expect(msg.content.map((b: { type: string }) => b.type)).toEqual(["thinking", "tool_use"]);
+    const thinking = msg.content[0];
+    expect(thinking.thinking).toBe("plan");
+    const env = decodeReasoningEnvelope(thinking.signature);
+    expect(env?.wire?.encrypted_content).toBe(blob);
+    expect(env?.wire?.id).toBe("rs_1");
+    expect(msg.content[1]).toMatchObject({ type: "tool_use", id: "toolu_1", name: "Bash" });
+  });
+
+  test("encrypted-only reasoning (no deltas) still emits a thinking block with wire", async () => {
+    const blob = "gAAAAAB-encrypted-only";
+    const upstream = [
+      sse("response.created", { response: { id: "resp_1", status: "in_progress" } }),
+      sse("response.output_item.added", { output_index: 0, item: { type: "reasoning", id: "rs_enc" } }),
+      sse("response.output_item.done", {
+        output_index: 0,
+        item: { type: "reasoning", id: "rs_enc", summary: [], encrypted_content: blob },
+      }),
+      sse("response.output_item.added", { output_index: 1, item: { type: "message", id: "msg_1" } }),
+      sse("response.output_text.delta", { item_id: "msg_1", output_index: 1, content_index: 0, delta: "ok" }),
+      sse("response.output_item.done", { output_index: 1, item: { type: "message", id: "msg_1" } }),
+      sse("response.completed", { response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1 } } }),
+    ].join("");
+
+    const msg = await collectAnthropicMessage(responsesSseToAnthropicSse(streamFrom(upstream), "m"), "m") as Record<string, any>;
+    expect(msg.content.map((b: { type: string }) => b.type)).toEqual(["thinking", "text"]);
+    const env = decodeReasoningEnvelope(msg.content[0].signature);
+    expect(env?.wire?.encrypted_content).toBe(blob);
+    expect(msg.content[0].thinking).toBe("");
+    expect(msg.content[1].text).toBe("ok");
   });
 
   test("multi-part reasoning summaries keep the JSON path's part separator", async () => {

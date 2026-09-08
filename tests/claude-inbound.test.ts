@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AnthropicRequestError, anthropicToResponsesBody, anthropicToResponsesTranslation, effortForThinkingBudget, extractOcxEffortDirective, resolveInboundModel } from "../src/claude/inbound";
+import { responsesJsonToAnthropicMessage } from "../src/claude/outbound";
+import { encodeResponsesReasoningSignature } from "../src/responses/reasoning-envelope";
 import { parseRequest } from "../src/responses/parser";
 import { responsesRequestSchema } from "../src/responses/schema";
 
@@ -71,6 +73,7 @@ describe("claude inbound translation", () => {
     expect(body.parallel_tool_calls).toBe(false);
     expect(body.tool_choice).toBe("auto");
     expect(body.reasoning).toEqual({ summary: "auto", effort: "medium" });
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
 
     const tools = body.tools as Record<string, any>[];
     expect(tools).toHaveLength(2);
@@ -81,12 +84,18 @@ describe("claude inbound translation", () => {
     expect(tools[1]).toEqual({ type: "web_search" });
 
     const input = body.input as Record<string, any>[];
-    // user text, assistant text (thinking dropped), function_call, function_call_output, user tail
-    expect(input.map(i => i.type ?? i.role)).toEqual(["message", "message", "function_call", "function_call_output", "message"]);
-    expect(input[1].content).toEqual([{ type: "output_text", text: "Reading it now." }]);
-    expect(input[2]).toMatchObject({ call_id: "toolu_01", name: "Read", arguments: JSON.stringify({ file_path: "/README.md" }) });
-    expect(input[3]).toMatchObject({ call_id: "toolu_01", output: [{ type: "input_text", text: "# hello" }] });
-    const tail = input[4].content as Record<string, any>[];
+    // user text, restored reasoning, assistant text, function_call, function_call_output, user tail
+    expect(input.map(i => i.type ?? i.role)).toEqual([
+      "message", "reasoning", "message", "function_call", "function_call_output", "message",
+    ]);
+    expect(input[1]).toEqual({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "I should read it" }],
+    });
+    expect(input[2].content).toEqual([{ type: "output_text", text: "Reading it now." }]);
+    expect(input[3]).toMatchObject({ call_id: "toolu_01", name: "Read", arguments: JSON.stringify({ file_path: "/README.md" }) });
+    expect(input[4]).toMatchObject({ call_id: "toolu_01", output: [{ type: "input_text", text: "# hello" }] });
+    const tail = input[5].content as Record<string, any>[];
     expect(tail[0]).toEqual({ type: "input_text", text: "now summarize" });
     expect(tail[1]).toEqual({ type: "input_image", image_url: "data:image/png;base64,aWc=" });
   });
@@ -505,6 +514,101 @@ describe("bundled-skill elision for routed models (devlog 260712 060)", () => {
   test("text-block carrier: drive-relative dir (no separator) stays pass-through", () => {
     const texts = userTexts(requestWithSkillTextBlock("claude-api", 500_000, undefined, "C:claude-api"));
     expect(texts.some(t => t.length > 400_000)).toBe(true);
+  });
+});
+
+describe("reasoning replay for muse-spark prefix cache", () => {
+  test("ocxr1 wire snapshot restores the exact Responses reasoning item", () => {
+    const wire = {
+      type: "reasoning",
+      id: "rs_muse_1",
+      summary: [{ type: "summary_text", text: "plan A" }],
+      encrypted_content: "native-blob-abc",
+    };
+    const signature = encodeResponsesReasoningSignature(wire, "plan A");
+    const body = anthropicToResponsesBody({
+      model: "m",
+      max_tokens: 16,
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "plan A", signature },
+            { type: "text", text: "hello" },
+          ],
+        },
+        { role: "user", content: "go on" },
+      ],
+    }) as Record<string, any>;
+    const input = body.input as Record<string, any>[];
+    expect(input.map(i => i.type ?? i.role)).toEqual(["message", "reasoning", "message", "message"]);
+    expect(input[1]).toEqual({
+      type: "reasoning",
+      id: "rs_muse_1",
+      summary: [{ type: "summary_text", text: "plan A" }],
+      encrypted_content: "native-blob-abc",
+    });
+    expect(() => parseRequest(body)).not.toThrow();
+  });
+
+  test("outbound JSON → inbound restores a stable growing prefix across turns", () => {
+    const upstream = {
+      id: "resp_1",
+      status: "completed",
+      output: [
+        {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [{ type: "summary_text", text: "step one" }],
+          encrypted_content: "blob-1",
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Answer 1" }],
+        },
+      ],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+    const anthropic = responsesJsonToAnthropicMessage(upstream, "claude-test") as Record<string, any>;
+    const thinking = anthropic.content.find((b: Record<string, unknown>) => b.type === "thinking");
+    expect(thinking.signature.startsWith("ocxr1:")).toBe(true);
+
+    const turn2 = anthropicToResponsesBody({
+      model: "m",
+      max_tokens: 32,
+      thinking: { type: "enabled", budget_tokens: 2048 },
+      system: "stable system",
+      messages: [
+        { role: "user", content: "q1" },
+        { role: "assistant", content: anthropic.content },
+        { role: "user", content: "q2" },
+      ],
+    }) as Record<string, any>;
+
+    const turn1Prefix = anthropicToResponsesBody({
+      model: "m",
+      max_tokens: 32,
+      thinking: { type: "enabled", budget_tokens: 2048 },
+      system: "stable system",
+      messages: [{ role: "user", content: "q1" }],
+    }) as Record<string, any>;
+
+    // Turn 2 must begin with turn 1's user message, then restored reasoning + assistant text.
+    expect(turn2.input[0]).toEqual(turn1Prefix.input[0]);
+    expect(turn2.input[1]).toMatchObject({
+      type: "reasoning",
+      id: "rs_1",
+      summary: [{ type: "summary_text", text: "step one" }],
+      encrypted_content: "blob-1",
+    });
+    expect(turn2.input[2]).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Answer 1" }],
+    });
+    expect(turn2.include).toEqual(["reasoning.encrypted_content"]);
   });
 });
 

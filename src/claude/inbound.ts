@@ -4,18 +4,23 @@
  * Design (devlog/260711_claude_inbound/010, 003_evidence.md):
  *  - translate-and-replay: the produced body MUST pass the real responsesRequestSchema
  *    parse so routing/OAuth/pool/failover are inherited unchanged.
- *  - thinking/redacted_thinking blocks on replay are DROPPED (v1 policy) — routed
- *    providers carry reasoning in Responses items/ocxr1 envelopes instead.
+ *  - thinking/redacted_thinking blocks on replay are restored as Responses `reasoning`
+ *    items (ocxr1 wire snapshot when present) so muse-spark / Meta prefix cache can
+ *    grow with history. Dropping them left only tools+instructions (~3.5k) cached.
  *  - thinking.budget_tokens is NEVER forwarded raw; it maps to an effort tier.
  *  - top_k is accepted and silently dropped (no Responses equivalent, CCR parity).
  */
 import type { OcxClaudeCodeConfig } from "../types";
 import { isAnthropicOutputSchema } from "../adapters/anthropic-output-schema";
+import { responsesReasoningFromThinkingBlock } from "../responses/reasoning-envelope";
 import { resolveAlias } from "./alias";
 import { stripOneMillionMarker } from "./context-windows";
 import { resolveDesktop3pAlias } from "./desktop-3p";
 import { isClaudeWebSearchToolName } from "./outbound";
 import { createHash } from "node:crypto";
+import { appendFile } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export class AnthropicRequestError extends Error {}
 
@@ -382,8 +387,15 @@ function assistantMessageToItems(content: unknown, input: Rec[]): void {
         break;
       }
       case "thinking":
-      case "redacted_thinking":
-        break; // v1 policy: dropped on replay (003 evidence — safe for routed providers)
+      case "redacted_thinking": {
+        // Restore as Responses reasoning so routed prefix caches (muse-spark) can reuse
+        // prior turns. ocxr1 signatures carry the upstream wire snapshot; bare text falls
+        // back to a summary_text item.
+        flush();
+        const restored = responsesReasoningFromThinkingBlock(raw);
+        if (restored) input.push(restored);
+        break;
+      }
       default:
         break;
     }
@@ -574,5 +586,91 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
     body.reasoning = reasoning;
   }
 
+  // Ask Responses backends for replayable reasoning blobs when thinking is on. Without this,
+  // muse-spark often returns display summary only and Claude→Meta prefix cache cannot grow.
+  if (isRec(body.reasoning) && body.reasoning.effort !== "none") {
+    body.include = ["reasoning.encrypted_content"];
+  }
+
+  maybeWriteCacheDiag(raw, body, cacheKeySource, input);
+
   return { body, cacheKeySource };
+}
+
+/**
+ * Structural-only Claude→Responses cache diagnosis (OCX_CACHE_DIAG=1).
+ * Appends ~/.opencodex/cache-diag.jsonl — counts/flags only, no prompt or tool text.
+ */
+function maybeWriteCacheDiag(
+  raw: Rec,
+  body: Rec,
+  cacheKeySource: ClaudeCacheKeySource,
+  input: Rec[],
+): void {
+  if (process.env.OCX_CACHE_DIAG !== "1" && process.env.OCX_CACHE_DIAG !== "true") return;
+  try {
+    const msgs = Array.isArray(raw.messages) ? raw.messages : [];
+    let thinkingBlocks = 0;
+    let thinkingWithSig = 0;
+    let assistantMsgs = 0;
+    let userMsgs = 0;
+    const assistantShapes: Record<string, number> = {};
+    for (const msg of msgs) {
+      if (!isRec(msg)) continue;
+      if (msg.role === "assistant") {
+        assistantMsgs++;
+        const content = Array.isArray(msg.content) ? msg.content : [];
+        const types = content.map((b) => (isRec(b) && typeof b.type === "string" ? b.type : "?"));
+        const shape = types.join("+") || "(empty)";
+        assistantShapes[shape] = (assistantShapes[shape] ?? 0) + 1;
+        for (const b of content) {
+          if (!isRec(b)) continue;
+          if (b.type !== "thinking" && b.type !== "redacted_thinking") continue;
+          thinkingBlocks++;
+          if (typeof b.signature === "string" && b.signature.length > 0) thinkingWithSig++;
+        }
+      } else if (msg.role === "user") {
+        userMsgs++;
+      }
+    }
+    const inputHist: Record<string, number> = {};
+    let reasoning = 0;
+    let reasoningEnc = 0;
+    let reasoningSummaryOnly = 0;
+    for (const item of input) {
+      const t = typeof item.type === "string" ? item.type : "?";
+      inputHist[t] = (inputHist[t] ?? 0) + 1;
+      if (t !== "reasoning") continue;
+      reasoning++;
+      if (typeof item.encrypted_content === "string" && item.encrypted_content.length > 0) {
+        reasoningEnc++;
+      } else {
+        reasoningSummaryOnly++;
+      }
+    }
+    const tools = Array.isArray(body.tools) ? body.tools : [];
+    const home = process.env.OPENCODEX_HOME || join(homedir(), ".opencodex");
+    const line = JSON.stringify({
+      ts: Date.now(),
+      cacheKeySource,
+      cacheKeyPrefix: typeof body.prompt_cache_key === "string" ? body.prompt_cache_key.slice(0, 12) : null,
+      model: typeof body.model === "string" ? body.model : null,
+      toolsN: tools.length,
+      msgs: msgs.length,
+      userMsgs,
+      assistantMsgs,
+      thinkingBlocks,
+      thinkingWithSig,
+      thinkingDropped: Math.max(0, thinkingBlocks - reasoning),
+      reasoning,
+      reasoningEnc,
+      reasoningSummaryOnly,
+      inputN: input.length,
+      inputHist,
+      assistantShapes,
+    });
+    appendFile(join(home, "cache-diag.jsonl"), `${line}\n`, () => {});
+  } catch {
+    // diagnosis must never break the request path
+  }
 }
