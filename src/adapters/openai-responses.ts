@@ -35,7 +35,6 @@ import {
 import {
   createAdapterTierMetadata,
 } from "../providers/fastwire";
-import { attachOpenCodeGoSessionHeader } from "../providers/opencode-go-session";
 
 // Headers relayed verbatim from the caller in OAuth-passthrough ("forward") mode.
 // Exported so the web-search sidecar reuses the exact same forwarded-auth set for its ChatGPT call.
@@ -2357,7 +2356,6 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         if (provider.apiKey) headers["Authorization"] = `Bearer ${provider.apiKey}`;
         if (provider.headers) Object.assign(headers, provider.headers);
       }
-      attachOpenCodeGoSessionHeader(provider, headers, parsed, incoming.headers);
 
       const forward = provider.authMode === "forward";
       let convertedRoutedCustomToolNames: Set<string> | undefined;

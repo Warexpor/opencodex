@@ -29,7 +29,6 @@ import {
 import { openaiChatCompletionsUrl } from "./openai-chat-url";
 import { stripResponsesOnlyEncryptedMarker } from "./responses-tool-schema";
 import { agentRouterDefaultHeaders, frameAgentRouterMessages } from "./agentrouter";
-import { attachOpenCodeGoSessionHeader } from "../providers/opencode-go-session";
 import {
   isXaiSchemaTarget,
   lookupLocalJsonPointer,
@@ -1449,7 +1448,6 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
     buildRequest(parsed: OcxParsedRequest) {
       lastRequestedModelId = parsed.modelId;
       const { url, headers, hasCredential } = openAIChatTransport(provider);
-      attachOpenCodeGoSessionHeader(provider, headers, parsed);
       const messages = frameAgentRouterMessages(provider.baseUrl, messagesToChatFormat(parsed, provider));
       const tools = toolsToChatFormatForProvider(parsed, provider);
       const toolChoice = toolChoiceToChatFormat(parsed.options.toolChoice, parsed.context.tools, provider);
