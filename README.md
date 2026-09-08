@@ -288,14 +288,14 @@ full-slash form keeps working too. Details: [model routing docs](https://opencod
 OpenAI (ChatGPT login or API key), Anthropic, Google Gemini, xAI, Kimi, Azure OpenAI, Ollama
 (local + Cloud), Cursor (experimental), and every OpenAI-compatible endpoint — plus DeepSeek,
 Groq, OpenRouter, Together, Fireworks, Cerebras, Mistral, Hugging Face, NVIDIA NIM, MiniMax,
-Qwen Cloud, SiliconFlow, and more. Full list: `ocx init` or the
+Qwen Cloud, Qoder Global and CN (official PAT + CLI), SiliconFlow, and more. Full list: `ocx init` or the
 [provider docs](https://opencodex.me/guides/providers/).
 
 ## CLI
 
 ```bash
 ocx init                       # interactive setup (writes config, wires Codex, offers the shim)
-ocx start [--port 10100]       # start the proxy in the foreground
+ocx start [--port 10100] [--socks5 [host:port] | --socks5-off]  # SOCKS5 defaults to socks5://127.0.0.1:10808
 ocx stop                       # stop + restore native Codex
 ocx service [install|repair|restart|start|stop|status|uninstall|remove]  # background service
 ocx codex-shim install         # start the proxy on demand whenever `codex` launches
