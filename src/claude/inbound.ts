@@ -17,6 +17,7 @@ export { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, e
 import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
 import { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";
 import { systemToInstructions, toolsToResponses, toolChoiceToResponses } from "./inbound-content-options";
+import { stabilizeClaudeInstructionsForPromptCache } from "./inbound-cache-stabilize";
 import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 import { createTranslatorBudget, type TranslatorBudget } from "../lib/translator-budget";
 
@@ -345,7 +346,21 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     stream: raw.stream === true,
   };
 
-  if (systemParts.length > 0) body.instructions = systemParts.join("\n\n");
+  if (systemParts.length > 0) {
+    // Claude Code appends growing <total_tokens> footers (and occasional
+    // TaskCreate nudges) into system text. That churn breaks Muse/Go prefix
+    // cache on the Responses instructions prefix even when tools stay stable.
+    // Strip dynamics from instructions; surface the latest notice on input.
+    const stabilized = stabilizeClaudeInstructionsForPromptCache(systemParts.join("\n\n"));
+    if (stabilized.instructions) body.instructions = stabilized.instructions;
+    if (stabilized.dynamicNotice) {
+      input.push({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: stabilized.dynamicNotice }],
+      });
+    }
+  }
 
   const tools = toolsToResponses(raw.tools);
   if (tools) body.tools = tools;
