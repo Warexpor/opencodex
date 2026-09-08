@@ -28,6 +28,7 @@ import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isTranslatorBudgetExceededError, retainTranslatedEventBatch, type TranslatorBudget } from "../lib/translator-budget";
 import { isReasoningEffortOmitted, modelRecordValue } from "../reasoning-effort";
+import { attachOpenCodeGoSessionHeader } from "../providers/opencode-go-session";
 import { applyAgentRouterLanguageFraming, isAgentRouterEndpoint } from "./agentrouter";
 
 /** Map a user content part to an Anthropic content block (text or image source). */
@@ -1031,6 +1032,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         else headers["x-api-key"] = provider.apiKey;
       }
       if (provider.headers) Object.assign(headers, provider.headers);
+      attachOpenCodeGoSessionHeader(provider, headers, parsed, incoming?.headers);
 
       // Prompt caching: native Anthropic supports top-level automatic caching, which
       // follows the moving final block across turns. Keep one breakpoint slot free for it.
