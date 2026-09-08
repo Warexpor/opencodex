@@ -93,4 +93,19 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
     });
     expect(input.some(item => item.role === "user" && item !== last)).toBe(true);
   });
+
+  test("Desktop prompt_cache_key fallback hashes stabilized instructions, not total_tokens footers", () => {
+    const stable = "You are Claude Code.";
+    const keyOf = (system: string) =>
+      anthropicToResponsesTranslation({
+        model: "m",
+        max_tokens: 1,
+        system,
+        messages: [{ role: "user", content: "hi" }],
+      }).body.prompt_cache_key as string;
+    const stableKey = keyOf(stable);
+    expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
+    expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
+  });
 });

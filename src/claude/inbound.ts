@@ -346,6 +346,7 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     stream: raw.stream === true,
   };
 
+  let stabilizedInstructions = "";
   if (systemParts.length > 0) {
     // Claude Code appends growing <total_tokens> footers (and occasional
     // TaskCreate nudges) into system text. That churn breaks Muse/Go prefix
@@ -360,6 +361,7 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
         content: [{ type: "input_text", text: stabilized.dynamicNotice }],
       });
     }
+    stabilizedInstructions = stabilized.instructions;
   }
 
   const tools = toolsToResponses(raw.tools);
@@ -398,11 +400,12 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     // Exact-prefix matching still isolates content; the key only steers routing
     // affinity. Callers must NOT synthesize a session_id header from this fallback
     // (audit 133 R2#3).
+    // Claude Code uses metadata.user_id session key; Desktop fallback must hash stabilized instructions so key tracks the cacheable prefix.
     body.prompt_cache_key = createHash("sha256")
       .update(canonicalJson({
         version: 2,
         model: body.model,
-        system: systemParts,
+        system: stabilizedInstructions,
         tools: Array.isArray(body.tools) ? body.tools : [],
       }))
       .digest("hex").slice(0, 32);
