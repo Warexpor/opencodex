@@ -1,12 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import type { OcxParsedRequest, OcxProviderConfig } from "../src/types";
+import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import {
   OPENCODE_GO_SESSION_HEADER,
   attachOpenCodeGoSessionHeader,
   isOpenCodeGoDestination,
   resolveOpenCodeGoSessionId,
   sanitizeOpenCodeGoSessionId,
-} from "../src/providers/opencode-go-session";
+} from "../../src/providers/opencode-go-session";
 
 function parsed(partial?: Partial<OcxParsedRequest>): OcxParsedRequest {
   return {
