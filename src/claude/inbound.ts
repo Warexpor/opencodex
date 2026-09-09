@@ -351,7 +351,7 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     // Claude Code appends growing <total_tokens> footers (and occasional
     // TaskCreate nudges) into system text. That churn breaks Muse/Go prefix
     // cache on the Responses instructions prefix even when tools stay stable.
-    // Strip dynamics from instructions; surface the latest notice on input.
+    // The helper is a no-op unless a trailing unfenced harness notice is identified.
     const stabilized = stabilizeClaudeInstructionsForPromptCache(systemParts.join("\n\n"));
     if (stabilized.instructions) body.instructions = stabilized.instructions;
     if (stabilized.dynamicNotice) {
