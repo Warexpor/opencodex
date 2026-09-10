@@ -32,14 +32,14 @@ describe("opencode-free provider", () => {
   test("static headers include only the public client markers", () => {
     expect(entry?.staticHeaders?.["Authorization"]).toBeUndefined();
     expect(entry?.staticHeaders?.["User-Agent"]).toBe("opencode");
-    expect(entry?.staticHeaders?.["x-opencode-client"]).toBe("desktop");
+    expect(entry?.staticHeaders?.["x-opencode-client"]).toBe("cli");
   });
 
   test("providerConfigSeed propagates static headers", () => {
     const seed = providerConfigSeed(entry!);
     expect(seed.headers?.["Authorization"]).toBeUndefined();
     expect(seed.headers?.["User-Agent"]).toBe("opencode");
-    expect(seed.headers?.["x-opencode-client"]).toBe("desktop");
+    expect(seed.headers?.["x-opencode-client"]).toBe("cli");
     expect(seed.keyOptional).toBe(true);
     expect(seed.liveModels).toBe(true);
   });
@@ -60,7 +60,7 @@ describe("opencode-free provider", () => {
     const headers = req.headers as Record<string, string>;
     expect(headers["Authorization"]).toBeUndefined();
     expect(headers["User-Agent"]).toBe("opencode");
-    expect(headers["x-opencode-client"]).toBe("desktop");
+    expect(headers["x-opencode-client"]).toBe("cli");
     expect(req.url).toBe("https://opencode.ai/zen/v1/chat/completions");
   });
 
@@ -73,7 +73,7 @@ describe("opencode-free provider", () => {
     const req = adapter.buildRequest(minimalRequest());
     const headers = req.headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer user-secret-key");
-    expect(headers["x-opencode-client"]).toBe("desktop");
+    expect(headers["x-opencode-client"]).toBe("cli");
   });
 
   test("the provider client marker still applies when a user apiKey is present", () => {
@@ -85,7 +85,7 @@ describe("opencode-free provider", () => {
     const req = adapter.buildRequest(minimalRequest());
     const headers = req.headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer user-secret-key");
-    expect(headers["x-opencode-client"]).toBe("desktop");
+    expect(headers["x-opencode-client"]).toBe("cli");
     expect(Object.keys(headers)).toContain("Authorization");
   });
 
@@ -105,17 +105,17 @@ describe("opencode-free provider", () => {
     test("a config saved with no header block gains the full registry set", () => {
       const routed = routedProviderConfig("opencode-free", persisted());
       expect(routed.headers?.["User-Agent"]).toBe("opencode");
-      expect(routed.headers?.["x-opencode-client"]).toBe("desktop");
+      expect(routed.headers?.["x-opencode-client"]).toBe("cli");
     });
 
     test("a config saved with only the older marker gains the new one", () => {
-      const routed = routedProviderConfig("opencode-free", persisted({ "x-opencode-client": "desktop" }));
+      const routed = routedProviderConfig("opencode-free", persisted({ "x-opencode-client": "cli" }));
       expect(routed.headers?.["User-Agent"]).toBe("opencode");
-      expect(routed.headers?.["x-opencode-client"]).toBe("desktop");
+      expect(routed.headers?.["x-opencode-client"]).toBe("cli");
     });
 
     test("the merged headers reach the wire, not just the resolved config", () => {
-      const routed = routedProviderConfig("opencode-free", persisted({ "x-opencode-client": "desktop" }));
+      const routed = routedProviderConfig("opencode-free", persisted({ "x-opencode-client": "cli" }));
       const req = createOpenAIChatAdapter(routed).buildRequest(minimalRequest());
       expect((req.headers as Record<string, string>)["User-Agent"]).toBe("opencode");
     });
@@ -130,15 +130,15 @@ describe("opencode-free provider", () => {
       expect(routed.headers?.["user-agent"]).toBe("custom-agent");
       expect(new Headers(routed.headers as Record<string, string>).get("user-agent")).toBe("custom-agent");
       // Names the user did not claim are still filled.
-      expect(routed.headers?.["x-opencode-client"]).toBe("desktop");
+      expect(routed.headers?.["x-opencode-client"]).toBe("cli");
     });
 
     test("model discovery carries the same fingerprint as inference", () => {
       // A provider identified as `opencode` when it completes but anonymous when it lists its
       // own models reads as two different clients to an upstream rate limiter.
-      const req = buildModelsRequest(persisted({ "x-opencode-client": "desktop" }), undefined, "opencode-free");
+      const req = buildModelsRequest(persisted({ "x-opencode-client": "cli" }), undefined, "opencode-free");
       expect(req.headers["User-Agent"]).toBe("opencode");
-      expect(req.headers["x-opencode-client"]).toBe("desktop");
+      expect(req.headers["x-opencode-client"]).toBe("cli");
     });
 
     test("model discovery honors a user User-Agent override", () => {

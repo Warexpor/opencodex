@@ -929,6 +929,7 @@
     "opencode-go-quota.test.ts": "providers",
     "opencode-go-session-header.test.ts": "providers",
     "opencode-zen-deepseek-reasoning.test.ts": "providers",
+    "opencode-zen-free-tier.test.ts": "providers",
     "opencode-zen-rate-limit.test.ts": "providers",
     "openrouter-provider-routing.test.ts": "providers",
     "optional-shutdown-hooks.test.ts": "lib",

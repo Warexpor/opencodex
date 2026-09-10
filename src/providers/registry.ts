@@ -509,6 +509,13 @@ const META_MUSE_REASONING_EFFORT_MAP: Record<string, string> = Object.fromEntrie
 /** Both Muse Spark 1.3 tiers publish a 1,048,576-token window (dev.meta.ai/docs/models). */
 const META_MUSE_CONTEXT_WINDOW = 1_048_576;
 const META_MUSE_MODELS = ["muse-spark-1.3", "muse-spark-1.3-contributor"];
+/** Muse Spark ids served on OpenCode Zen /v1/responses (keyed + free tiers). */
+const OPENCODE_ZEN_MUSE_MODELS = [
+  "muse-spark-1.3",
+  "muse-spark-1.3-contributor-free",
+  "muse-spark-1.2",
+  "muse-spark-1.2-contributor-free",
+] as const;
 /**
  * Daybreak program aliases. These `-latest` ids are the stable contract: OpenAI repoints
  * them at newer snapshots over time (red -> gpt-5.6-cyber, blue -> gpt-5.6-sol as of
@@ -2961,18 +2968,43 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // continuations, or the gateway answers HTTP 400 (issues #950/#994). Mirror the DeepSeek
     // reasoning + thinking metadata so `opencode-zen/deepseek-v4-flash-free` — and the other
     // Zen DeepSeek thinking models — never serialize a bare tool-call turn.
-    note: "Keyed OpenCode Zen gateway. Free models on this tier are often short-window rate-limited at roughly 15-20 requests/minute (community-measured; OpenCode does not publish RPM). Zen may return generic 429s without Retry-After / X-RateLimit headers; when Retry-After is omitted, opencodex adds a synthetic backoff hint (upstream Retry-After still wins). Distinct from the keyless opencode-free desktop quota (~200 Big Pickle/free-model requests per 5 hours). Docs: https://opencode.ai/docs/zen/. Free-model prompts may be retained for training — do not send confidential material.",
-    modelReasoningEfforts: Object.fromEntries(
-      [...DEEPSEEK_THINKING_MODELS, ...OPENCODE_FREE_DEEPSEEK_MODELS].map(id => [id, deepseekThinkingEffortsFor(id)]),
-    ),
-    modelReasoningEffortMap: Object.fromEntries(
-      [...DEEPSEEK_THINKING_MODELS, ...OPENCODE_FREE_DEEPSEEK_MODELS].map(id => [id, deepseekReasoningMapFor(id)]),
-    ),
+    note: "Keyed OpenCode Zen gateway with an in-tree free-tier CLI identity path (User-Agent opencode, x-opencode-client=cli, ses_/msg_ headers). Free models on this tier are often short-window rate-limited at roughly 15-20 requests/minute (community-measured; OpenCode does not publish RPM). Zen may return generic 429s without Retry-After / X-RateLimit headers; when Retry-After is omitted, opencodex adds a synthetic backoff hint (upstream Retry-After still wins). Distinct from the keyless opencode-free quota (~200 Big Pickle/free-model requests per 5 hours). Muse Spark ids ride /v1/responses. Docs: https://opencode.ai/docs/zen/. Free-model prompts may be retained for training — do not send confidential material. Outbound SOCKS5: ocx start --socks5 (default 127.0.0.1:10808).",
+    /* Free-tier unlock: Zen rejects free models without OpenCode CLI identity
+     * ("OpenCode's free tier can only be used in OpenCode"). Match the CLI pair
+     * (unversioned UA + client=cli). Session/request ids are stamped at settle
+     * time by resolveOpenCodeZenTransport. Operators can still override via
+     * provider headers; user headers win case-insensitively at route time. */
+    staticHeaders: {
+      "User-Agent": "opencode",
+      "x-opencode-client": "cli",
+    },
+    /* Muse Spark (incl. contributor-free) is documented on Zen /v1/responses, not chat. */
+    modelWireDefaults: {
+      "muse-spark-1.3": "openai-responses",
+      "muse-spark-1.3-contributor-free": "openai-responses",
+      "muse-spark-1.2": "openai-responses",
+      "muse-spark-1.2-contributor-free": "openai-responses",
+    },
+    modelReasoningEfforts: Object.fromEntries([
+      ...[...DEEPSEEK_THINKING_MODELS, ...OPENCODE_FREE_DEEPSEEK_MODELS].map(id => [id, deepseekThinkingEffortsFor(id)]),
+      ...OPENCODE_ZEN_MUSE_MODELS.map(id => [id, META_MUSE_REASONING_EFFORTS]),
+    ]),
+    modelReasoningEffortMap: Object.fromEntries([
+      ...[...DEEPSEEK_THINKING_MODELS, ...OPENCODE_FREE_DEEPSEEK_MODELS].map(id => [id, deepseekReasoningMapFor(id)]),
+      ...OPENCODE_ZEN_MUSE_MODELS.map(id => [id, META_MUSE_REASONING_EFFORT_MAP]),
+    ]),
+    // High default burns the whole max_output_tokens budget on reasoning_tokens with
+    // an empty output for contributor-free Muse; minimal leaves room for visible text.
+    modelDefaultReasoningEfforts: Object.fromEntries(OPENCODE_ZEN_MUSE_MODELS.map(id => [id, "minimal"])),
     preserveReasoningContentModels: [...DEEPSEEK_THINKING_MODELS, ...OPENCODE_FREE_DEEPSEEK_MODELS],
     // Same Zen gateway as opencode-free: the DeepSeek vision preview id
     // (merges into deepseek-v4-flash later).
     modelContextWindows: {
       [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576,
+      "muse-spark-1.3": META_MUSE_CONTEXT_WINDOW,
+      "muse-spark-1.3-contributor-free": META_MUSE_CONTEXT_WINDOW,
+      "muse-spark-1.2": META_MUSE_CONTEXT_WINDOW,
+      "muse-spark-1.2-contributor-free": META_MUSE_CONTEXT_WINDOW,
     },
     modelInputModalities: {
       [DEEPSEEK_VISION_PREVIEW_MODEL]: ["text", "image"],
@@ -2989,28 +3021,41 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     keyOptional: true,
     featured: true,
     liveModels: true,
-    note: "No key needed — public desktop tier. OpenCode currently advertises about 200 Big Pickle/free-model requests per 5 hours. The same Zen gateway can also short-window rate-limit free models at roughly 15-20 requests/minute, and may return generic 429s without Retry-After (opencodex synthesizes backoff only when that header is omitted). Free models are discovered live from Zen. Data use: per OpenCode's Zen docs (https://opencode.ai/docs/zen/), prompts sent to free models may be retained and used for training/improvement — do not send confidential material through this provider.",
+    note: "No key needed — public free tier with in-tree OpenCode CLI identity (x-opencode-client=cli). OpenCode currently advertises about 200 Big Pickle/free-model requests per 5 hours. The same Zen gateway can also short-window rate-limit free models at roughly 15-20 requests/minute, and may return generic 429s without Retry-After (opencodex synthesizes backoff only when that header is omitted). Free models are discovered live from Zen. Muse Spark free ids use /v1/responses with default reasoning.effort=minimal. Data use: per OpenCode's Zen docs (https://opencode.ai/docs/zen/), prompts sent to free models may be retained and used for training/improvement — do not send confidential material through this provider. Outbound SOCKS5: ocx start --socks5.",
     dashboardUrl: "https://opencode.ai",
     staticHeaders: {
-      // Zen answers a bare runtime User-Agent (Bun/x.y.z) more aggressively than a client
-      // that identifies itself, which is what the 429 in #2067 traced to. The value is
-      // deliberately unversioned: a pinned "opencode-cli/<version>" is a claim about an
-      // install we do not have and goes stale on the vendor's schedule, not ours.
-      // Corroboration, not authority: OmniRoute — an independent open-source broker against
-      // the same Zen upstream — defaults to exactly this pair (userAgent "opencode", client
-      // "desktop") in open-sse/executors/opencode.ts, and got there by RETREATING from its
-      // own earlier "opencode-cli/1.0.0" pin. An operator can still override either value
-      // through the provider headers API; user headers win case-insensitively at route time.
+      // Free-tier unlock requires CLI identity, not a bare Bun UA (#2067 still wants a
+      // non-runtime fingerprint). Prefer `cli` over the older OmniRoute `desktop` pair:
+      // Zen answers "OpenCode's free tier can only be used in OpenCode" without it.
+      // Unversioned "opencode" UA avoids claiming a CLI install we do not ship.
+      // Operators can still override either value through the provider headers API.
       "User-Agent": "opencode",
-      "x-opencode-client": "desktop",
+      "x-opencode-client": "cli",
     },
-    modelReasoningEfforts: Object.fromEntries(OPENCODE_FREE_DEEPSEEK_MODELS.map(id => [id, deepseekThinkingEffortsFor(id)])),
-    modelReasoningEffortMap: Object.fromEntries(OPENCODE_FREE_DEEPSEEK_MODELS.map(id => [id, deepseekReasoningMapFor(id)])),
+    modelWireDefaults: {
+      "muse-spark-1.3": "openai-responses",
+      "muse-spark-1.3-contributor-free": "openai-responses",
+      "muse-spark-1.2": "openai-responses",
+      "muse-spark-1.2-contributor-free": "openai-responses",
+    },
+    modelReasoningEfforts: Object.fromEntries([
+      ...OPENCODE_FREE_DEEPSEEK_MODELS.map(id => [id, deepseekThinkingEffortsFor(id)]),
+      ...OPENCODE_ZEN_MUSE_MODELS.map(id => [id, META_MUSE_REASONING_EFFORTS]),
+    ]),
+    modelReasoningEffortMap: Object.fromEntries([
+      ...OPENCODE_FREE_DEEPSEEK_MODELS.map(id => [id, deepseekReasoningMapFor(id)]),
+      ...OPENCODE_ZEN_MUSE_MODELS.map(id => [id, META_MUSE_REASONING_EFFORT_MAP]),
+    ]),
+    modelDefaultReasoningEfforts: Object.fromEntries(OPENCODE_ZEN_MUSE_MODELS.map(id => [id, "minimal"])),
     preserveReasoningContentModels: OPENCODE_FREE_DEEPSEEK_MODELS,
     // The DeepSeek vision preview id is preemptive metadata for when Zen starts
     // serving it (merges into v4-flash later).
     modelContextWindows: {
       [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576,
+      "muse-spark-1.3": META_MUSE_CONTEXT_WINDOW,
+      "muse-spark-1.3-contributor-free": META_MUSE_CONTEXT_WINDOW,
+      "muse-spark-1.2": META_MUSE_CONTEXT_WINDOW,
+      "muse-spark-1.2-contributor-free": META_MUSE_CONTEXT_WINDOW,
     },
     modelInputModalities: {
       [DEEPSEEK_VISION_PREVIEW_MODEL]: ["text", "image"],

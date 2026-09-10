@@ -400,10 +400,16 @@ Pi can omit session affinity when `cacheRetention` is `none`; enable cache reten
 when a stable upstream session is required.
 
 **OpenCode Zen** (`opencode-zen`) and the keyless **OpenCode Free** preset share
-`https://opencode.ai/zen/v1`. Free models on that gateway often hit a short-window burst
+`https://opencode.ai/zen/v1`. Both stamp an in-tree OpenCode CLI free-tier identity
+(`User-Agent: opencode`, `x-opencode-client: cli`, plus per-key `x-opencode-session` /
+per-call `x-opencode-request`) so free models unlock without an external gateway.
+Legacy saved `x-opencode-client: desktop` is upgraded to `cli` at request settle.
+Muse Spark free ids ride `/v1/responses` with default `reasoning.effort=minimal`.
+If Zen needs a SOCKS path on your network, use `ocx start --socks5` (default
+`127.0.0.1:10808`). Free models on that gateway often hit a short-window burst
 limit around 15–20 requests/minute (community-measured; OpenCode does not publish RPM).
 Zen may return generic rate-limit 429 responses without `Retry-After` / `X-RateLimit-*`
-headers. That is separate from the keyless desktop quota OpenCode advertises
+headers. That is separate from the keyless free quota OpenCode advertises
 (~200 Big Pickle/free-model requests per 5 hours on `opencode-free`). When Zen omits
 `Retry-After` on such a 429, opencodex adds provider guidance to the client error and a
 synthetic `Retry-After`; an upstream `Retry-After` still takes precedence. Same-key

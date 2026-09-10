@@ -26,6 +26,7 @@ import { NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeModel }
 import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import { resolveOpenCodeGoTransport } from "../providers/opencode-go-transport";
+import { resolveOpenCodeZenTransport } from "../providers/opencode-zen-transport";
 import { normalizeLogConversationId, sessionLaneIdFromRequest } from "./request-log-conversation";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
@@ -140,6 +141,7 @@ async function handleChatCompletionsWithBudget(
     const route = routeModel(config, chatBody.model as string, evidenceFromBody(chatBody));
     route.provider = resolveOpenCodeGoTransport(route.provider,
       sessionLaneIdFromRequest(req.headers) ?? normalizeLogConversationId(req.headers.get("x-opencode-session")));
+    route.provider = resolveOpenCodeZenTransport(route.provider);
     // Settle the wire once so every branch below reads the adapter this model will
     // actually use, not the provider-wide default (#404).
     route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, "chat");

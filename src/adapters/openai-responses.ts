@@ -647,6 +647,27 @@ function mapRoutedResponsesReasoningEffort(
   return { ...body, reasoning: { ...body.reasoning, effort: mapped } };
 }
 
+/**
+ * When the inbound body omits reasoning.effort, stamp the registry default so
+ * models whose upstream default is too aggressive (Muse contributor-free burns
+ * the whole max_output_tokens budget on reasoning_tokens) still emit visible text.
+ */
+function applyDefaultResponsesReasoningEffort(
+  body: unknown,
+  provider: OcxProviderConfig,
+  modelId: string,
+): unknown {
+  if (!isPlainObject(body)) return body;
+  const def = modelRecordValue(provider.modelDefaultReasoningEfforts, modelId);
+  if (typeof def !== "string" || !def) return body;
+  if (isPlainObject(body.reasoning) && typeof body.reasoning.effort === "string") return body;
+  const mapped = mapReasoningEffort(provider, modelId, def) ?? def;
+  return {
+    ...body,
+    reasoning: { ...(isPlainObject(body.reasoning) ? body.reasoning : {}), effort: mapped },
+  };
+}
+
 function normalizeFunctionToolSchema(tool: unknown, xaiTarget: boolean): unknown | undefined {
   if (!isPlainObject(tool) || tool.type !== "function") return tool;
   if (xaiTarget) {
@@ -2371,6 +2392,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         allowStringContent: isXaiResponsesDestination(provider),
       });
       outBody = mapRoutedResponsesReasoningEffort(outBody, provider, parsed.modelId);
+      outBody = applyDefaultResponsesReasoningEffort(outBody, provider, parsed.modelId);
       // stripPreviousResponseId() intentionally returns its input on a no-op. Detach before the
       // tier write so a force-fast/default decision can never mutate parsed._rawBody.
       outBody = applyTierDecisionToResponsesBody(outBody, parsed.options?.tierDecision);
