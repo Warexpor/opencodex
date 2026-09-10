@@ -2341,7 +2341,12 @@ async function applyFinalRouteRequestNormalization(args: {
   // Settle the wire once so logging, fast-mode, auth, and sidecars read the adapter
   // this request will actually use (#404).
   route.provider = resolveOpenCodeGoTransport(route.provider,
-    sessionLaneIdFromRequest(req.headers) ?? normalizeLogConversationId(req.headers.get("x-opencode-session")));
+    sessionLaneIdFromRequest(req.headers)
+      ?? normalizeLogConversationId(req.headers.get("x-opencode-session"))
+      // Grok Build sends no Codex/Claude session headers; OpenCode Go now rejects
+      // MissingSessionID without x-opencode-session. The attribution marker is a
+      // stable local lane so managed Grok traffic stays routable.
+      ?? (req.headers.get("x-opencodex-grok") === "1" ? "opencodex-grok-build" : undefined));
   route.provider = resolveOpenCodeZenTransport(route.provider);
   route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   if (preserveAnthropicResponseModel) parsed._responseModelId = responseModelId;

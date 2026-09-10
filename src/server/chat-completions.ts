@@ -140,7 +140,9 @@ async function handleChatCompletionsWithBudget(
   try {
     const route = routeModel(config, chatBody.model as string, evidenceFromBody(chatBody));
     route.provider = resolveOpenCodeGoTransport(route.provider,
-      sessionLaneIdFromRequest(req.headers) ?? normalizeLogConversationId(req.headers.get("x-opencode-session")));
+      sessionLaneIdFromRequest(req.headers)
+        ?? normalizeLogConversationId(req.headers.get("x-opencode-session"))
+        ?? (req.headers.get("x-opencodex-grok") === "1" ? "opencodex-grok-build" : undefined));
     route.provider = resolveOpenCodeZenTransport(route.provider);
     // Settle the wire once so every branch below reads the adapter this model will
     // actually use, not the provider-wide default (#404).

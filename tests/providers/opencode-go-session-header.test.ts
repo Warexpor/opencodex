@@ -359,6 +359,17 @@ describe("OpenCode Go session affinity (#3344)", () => {
     expect(resolveOpenCodeGoTransport(configured, undefined).headers?.[SESSION_HEADER]).toBeUndefined();
   });
 
+  test("Grok attribution marker supplies a stable Go lane on Responses and Chat", async () => {
+    const headers = { "content-type": "application/json", "x-opencodex-grok": "1" };
+    const responses = await captureRequest({ model: MUSE_MODEL, headers });
+    const chat = await captureRequest({ nativeChat: true, model: CHAT_MODEL, headers });
+    // Fixed SHA-256 of domain-separator + "opencodex-grok-build".
+    expect(responses.headers.get(SESSION_HEADER)).toBe("ocx_59a6be9aac7c596d4fbcd57bc1421c9e");
+    expect(chat.headers.get(SESSION_HEADER)).toBe("ocx_59a6be9aac7c596d4fbcd57bc1421c9e");
+    expect(responses.url).toBe("https://opencode.ai/zen/go/v1/responses");
+    expect(chat.url).toBe("https://opencode.ai/zen/go/v1/chat/completions");
+  });
+
   test("does not inject the header into a lookalike destination", async () => {
     const captured = await captureRequest({
       providerName: "custom-go",
