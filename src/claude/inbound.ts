@@ -347,28 +347,23 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
   };
 
   const joinedSystem = systemParts.length > 0 ? systemParts.join("\n\n") : "";
-  // Claude Code sends metadata.user_id (session uuid). Desktop does not.
-  // Trailing-notice peel is therefore opt-in to that provenance: a matching
-  // textual suffix is not enough to rewrite every Anthropic→Responses caller.
-  const claudeCodeHarness = isRec(raw.metadata) && typeof raw.metadata.user_id === "string";
+  let stabilizedInstructions = "";
   if (joinedSystem) {
-    if (claudeCodeHarness) {
-      // Claude Code appends growing <total_tokens> footers (and occasional
-      // TaskCreate nudges) into system text. That churn breaks Muse/Go prefix
-      // cache on the Responses instructions prefix even when tools stay stable.
-      // Peel only a trailing unfenced harness notice; otherwise keep the join.
-      const stabilized = stabilizeClaudeInstructionsForPromptCache(joinedSystem);
-      if (stabilized.instructions) body.instructions = stabilized.instructions;
-      if (stabilized.dynamicNotice) {
-        input.push({
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: stabilized.dynamicNotice }],
-        });
-      }
-    } else {
-      body.instructions = joinedSystem;
+    // Claude Code appends growing <total_tokens>N tokens left</total_tokens>
+    // footers (and occasional TaskCreate nudges) into system text. That churn
+    // breaks Muse/Go prefix cache on the Responses instructions prefix even
+    // when tools stay stable. The trailing unfenced harness shape is the
+    // provenance signal; the helper is a no-op unless that suffix is present.
+    const stabilized = stabilizeClaudeInstructionsForPromptCache(joinedSystem);
+    if (stabilized.instructions) body.instructions = stabilized.instructions;
+    if (stabilized.dynamicNotice) {
+      input.push({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: stabilized.dynamicNotice }],
+      });
     }
+    stabilizedInstructions = stabilized.instructions;
   }
 
   const tools = toolsToResponses(raw.tools);
@@ -407,14 +402,14 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     // Exact-prefix matching still isolates content; the key only steers routing
     // affinity. Callers must NOT synthesize a session_id header from this fallback
     // (audit 133 R2#3).
-    // Desktop has no metadata.user_id so peel does not run; hash the raw
-    // systemParts join the upstream actually receives. Claude Code uses the
-    // session key above instead of this fallback.
+    // Claude Code uses metadata.user_id session key above. Desktop fallback
+    // hashes the same string used for body.instructions (stabilized remainder
+    // when a trailing harness footer was peeled, otherwise the raw join).
     body.prompt_cache_key = createHash("sha256")
       .update(canonicalJson({
         version: 2,
         model: body.model,
-        system: systemParts,
+        system: stabilizedInstructions,
         tools: Array.isArray(body.tools) ? body.tools : [],
       }))
       .digest("hex").slice(0, 32);

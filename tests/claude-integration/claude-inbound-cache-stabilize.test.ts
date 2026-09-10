@@ -8,7 +8,7 @@ const TASKCREATE_NUDGE = [
 ].join(" ");
 
 function footer(used: number): string {
-  return `<total_tokens>${used}</total_tokens>`;
+  return `<total_tokens>${used} tokens left</total_tokens>`;
 }
 
 function translate(system: string, metadata?: { user_id: string }) {
@@ -19,10 +19,6 @@ function translate(system: string, metadata?: { user_id: string }) {
     messages: [{ role: "user", content: "hi" }],
     ...(metadata ? { metadata } : {}),
   });
-}
-
-function translateClaudeCode(system: string) {
-  return translate(system, { user_id: "user-abc" });
 }
 
 function userTurns(body: { input: unknown }) {
@@ -72,6 +68,21 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
     expect(result.instructions).toBe(stable);
     expect(result.instructions).not.toContain("<total_tokens>");
     expect(result.dynamicNotice).toBe(third);
+  });
+
+  test("real Claude Code 15000000 tokens left trailing footer peels", () => {
+    const stable = "You are Claude Code.";
+    const harness = footer(15_000_000);
+    const result = stabilizeClaudeInstructionsForPromptCache(`${stable}\n\n${harness}`);
+    expect(result.instructions).toBe(stable);
+    expect(result.dynamicNotice).toBe("<total_tokens>15000000 tokens left</total_tokens>");
+  });
+
+  test("bare numeric total_tokens without tokens left is not a harness footer", () => {
+    const docs = "You are Claude Code.\n\n<total_tokens>123</total_tokens>";
+    const result = stabilizeClaudeInstructionsForPromptCache(docs);
+    expect(result.instructions).toBe(docs);
+    expect(result.dynamicNotice).toBeNull();
   });
 
   test("mid-document total_tokens stays; only the trailing harness footer relocates", () => {
@@ -158,10 +169,10 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
 });
 
 describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
-  test("Claude Code relocates the latest total_tokens footer onto a trailing input user message", () => {
+  test("relocates the latest total_tokens footer onto a trailing input user message", () => {
     const first = footer(1000);
     const latest = footer(8000);
-    const { body } = translateClaudeCode(["You are Claude Code.", first, latest].join("\n\n"));
+    const { body } = translate(["You are Claude Code.", first, latest].join("\n\n"));
     expect(body.instructions).toBe("You are Claude Code.");
     expect(String(body.instructions)).not.toContain("<total_tokens>");
     const input = userTurns(body);
@@ -174,18 +185,21 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
     expect(input.some(item => item.role === "user" && item !== last)).toBe(true);
   });
 
-  test("without metadata.user_id a trailing total_tokens suffix is not relocated", () => {
-    const system = ["You are Claude Code.", footer(8000)].join("\n\n");
-    const { body } = translate(system);
-    expect(body.instructions).toBe(system);
-    expect(userTurns(body)).toEqual([
-      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-    ]);
+  test("peel does not require metadata.user_id", () => {
+    const latest = footer(14_980_071);
+    const { body } = translate(["You are Claude Code.", latest].join("\n\n"));
+    expect(body.instructions).toBe("You are Claude Code.");
+    const input = userTurns(body);
+    expect(input[input.length - 1]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: latest }],
+    });
   });
 
   test("fenced standalone total_tokens example is a translator no-op", () => {
     const system = ["You are a docs bot.", "```", footer(123), "```", ""].join("\n");
-    const { body } = translateClaudeCode(system);
+    const { body } = translate(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
@@ -194,17 +208,17 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
 
   test("open fence to EOF with a trailing total_tokens tag is not relocated", () => {
     const system = ["You are a docs bot.", "```", footer(123)].join("\n");
-    const { body } = translateClaudeCode(system);
+    const { body } = translate(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
     ]);
   });
 
-  test("real footer after a closed fence still relocates on the Claude Code path", () => {
+  test("real footer after a closed fence still relocates", () => {
     const docs = ["Docs:", "```", footer(123), "```"].join("\n");
     const latest = footer(8000);
-    const { body } = translateClaudeCode(`${docs}\n\n${latest}`);
+    const { body } = translate(`${docs}\n\n${latest}`);
     expect(body.instructions).toBe(docs);
     const input = userTurns(body);
     expect(input[input.length - 1]).toEqual({
@@ -225,19 +239,20 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
 
   test("Claude Code session prompt_cache_key is unchanged across trailing footers", () => {
     const stable = "You are Claude Code.";
-    const keyOf = (system: string) => translateClaudeCode(system).body.prompt_cache_key as string;
+    const keyOf = (system: string) =>
+      translate(system, { user_id: "user-abc" }).body.prompt_cache_key as string;
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
     expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
     expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
   });
 
-  test("Desktop prompt_cache_key fallback hashes raw systemParts including footers", () => {
+  test("Desktop prompt_cache_key fallback hashes stabilized instructions, not total_tokens footers", () => {
     const stable = "You are Claude Code.";
     const keyOf = (system: string) => translate(system).body.prompt_cache_key as string;
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
-    expect(keyOf(stable)).toBe(stableKey);
-    expect(keyOf([stable, footer(8000)].join("\n\n"))).not.toBe(stableKey);
+    expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
+    expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
   });
 });

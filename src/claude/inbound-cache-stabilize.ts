@@ -8,12 +8,12 @@
  * Relocation is identified by harness shape: only a trailing, unfenced,
  * canonical notice at the end of instructions is moved. An unmatched fence
  * opener covers through EOF. No match → the original string is returned
- * byte-for-byte. Callers must still opt in (Claude Code `metadata.user_id`);
- * this helper does not imply every Anthropic→Responses caller should peel.
+ * byte-for-byte. The positive ID is that trailing shape (Claude Code writes
+ * `<total_tokens>N tokens left</total_tokens>`), not a request-level gate.
  */
 
 const TRAILING_TOTAL_RE =
-  /(?:^|(?:\r?\n)+)[ \t]*(<total_tokens>\d+<\/total_tokens>)[ \t]*(?:\r?\n)*$/;
+  /(?:^|(?:\r?\n)+)[ \t]*(<total_tokens>\d+\s+tokens left<\/total_tokens>)[ \t]*(?:\r?\n)*$/;
 
 const TRAILING_NUDGE_RE =
   /(?:^|(?:\r?\n)+)[ \t]*(The task tools haven't been used recently\.\s+If you're working on tasks that would benefit from tracking, consider using TaskCreate to add them\.\s+Only use these if relevant to the current work\.\s+This is just a gentle reminder - ignore if not applicable\.)[ \t]*(?:\r?\n)*$/;
