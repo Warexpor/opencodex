@@ -5,11 +5,11 @@
  * prefix even when tools stay stable. Strip dynamics from instructions;
  * surface the latest notice on `input` instead.
  *
- * Relocation is identified by harness shape, not applied to every system
- * prompt: only a trailing, unfenced, canonical notice at the end of
- * instructions is moved. No match → the original string is returned
- * byte-for-byte (no trim, no newline collapse). Fenced examples and
- * mid-document tags stay put.
+ * Relocation is identified by harness shape: only a trailing, unfenced,
+ * canonical notice at the end of instructions is moved. An unmatched fence
+ * opener covers through EOF. No match → the original string is returned
+ * byte-for-byte. Callers must still opt in (Claude Code `metadata.user_id`);
+ * this helper does not imply every Anthropic→Responses caller should peel.
  */
 
 const TRAILING_TOTAL_RE =
@@ -23,7 +23,15 @@ interface FenceRange {
   end: number;
 }
 
-/** Well-formed ``` / ~~~ pairs. Unclosed openers do not swallow a trailing suffix. */
+const FENCE_OPEN_RE = /^( {0,3})(`{3,}|~{3,})/;
+const FENCE_CLOSE_RE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * Markdown fence ranges. An unmatched opener covers through EOF: unfinished
+ * fenced examples are code content, not a harness suffix. A closer must be a
+ * standalone fence line (no info string) of the same character and at least
+ * the opener's length.
+ */
 function fencedRanges(source: string): FenceRange[] {
   const ranges: FenceRange[] = [];
   let offset = 0;
@@ -33,13 +41,19 @@ function fencedRanges(source: string): FenceRange[] {
     const nl = source.indexOf("\n", offset);
     const lineEnd = nl === -1 ? source.length : nl;
     const line = source.slice(offset, lineEnd).replace(/\r$/, "");
-    const fence = /^( {0,3})(`{3,}|~{3,})/.exec(line);
-    if (fence) {
-      const mark = fence[2]!;
-      if (openAt === null) {
+    if (openAt === null) {
+      const open = FENCE_OPEN_RE.exec(line);
+      if (open) {
         openAt = offset;
-        openFence = mark;
-      } else if (mark[0] === openFence[0] && mark.length >= openFence.length) {
+        openFence = open[2]!;
+      }
+    } else {
+      const close = FENCE_CLOSE_RE.exec(line);
+      if (
+        close
+        && close[2]![0] === openFence[0]
+        && close[2]!.length >= openFence.length
+      ) {
         ranges.push({ start: openAt, end: lineEnd });
         openAt = null;
         openFence = "";
@@ -48,6 +62,7 @@ function fencedRanges(source: string): FenceRange[] {
     if (nl === -1) break;
     offset = nl + 1;
   }
+  if (openAt !== null) ranges.push({ start: openAt, end: source.length });
   return ranges;
 }
 
