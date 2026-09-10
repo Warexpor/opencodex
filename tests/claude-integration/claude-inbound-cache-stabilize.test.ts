@@ -8,7 +8,7 @@ const TASKCREATE_NUDGE = [
 ].join(" ");
 
 function footer(used: number): string {
-  return `<total_tokens>${used}</total_tokens>`;
+  return `<total_tokens>${used} tokens left</total_tokens>`;
 }
 
 function translate(system: string, metadata?: { user_id: string }) {
@@ -74,6 +74,21 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
     expect(result.dynamicNotice).toBe(third);
   });
 
+  test("live Claude Code remaining-tokens footer peels", () => {
+    const stable = "You are Claude Code.";
+    const live = footer(15_000_000);
+    const result = stabilizeClaudeInstructionsForPromptCache(`${stable}\n\n${live}`);
+    expect(result.instructions).toBe(stable);
+    expect(result.dynamicNotice).toBe("<total_tokens>15000000 tokens left</total_tokens>");
+  });
+
+  test("trailing bare-digit total_tokens tag is not a harness suffix", () => {
+    const docs = "You are Claude Code.\n\n<total_tokens>15000000</total_tokens>";
+    const result = stabilizeClaudeInstructionsForPromptCache(docs);
+    expect(result.instructions).toBe(docs);
+    expect(result.dynamicNotice).toBeNull();
+  });
+
   test("mid-document total_tokens stays; only the trailing harness footer relocates", () => {
     const result = stabilizeClaudeInstructionsForPromptCache(
       `System.\n${footer(1)}\nMore system.\n${footer(3)}`,
@@ -104,7 +119,7 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
   });
 
   test("inline documentation of total_tokens tags stays in instructions", () => {
-    const docs = "The harness may emit a <total_tokens>123</total_tokens> footer; do not invent one.";
+    const docs = "The harness may emit a <total_tokens>123 tokens left</total_tokens> footer; do not invent one.";
     const result = stabilizeClaudeInstructionsForPromptCache(docs);
     expect(result.instructions).toBe(docs);
     expect(result.dynamicNotice).toBeNull();
@@ -125,7 +140,7 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
   });
 
   test("docs plus a real trailing footer keep the docs and move only the latest footer", () => {
-    const docs = "Describe <total_tokens>0</total_tokens> in the protocol guide.";
+    const docs = "Describe <total_tokens>0 tokens left</total_tokens> in the protocol guide.";
     const latest = footer(8000);
     const result = stabilizeClaudeInstructionsForPromptCache(
       [docs, footer(1), latest].join("\n\n"),
@@ -158,10 +173,10 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
 });
 
 describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
-  test("Claude Code relocates the latest total_tokens footer onto a trailing input user message", () => {
+  test("relocates the latest total_tokens footer onto a trailing input user message", () => {
     const first = footer(1000);
     const latest = footer(8000);
-    const { body } = translateClaudeCode(["You are Claude Code.", first, latest].join("\n\n"));
+    const { body } = translate(["You are Claude Code.", first, latest].join("\n\n"));
     expect(body.instructions).toBe("You are Claude Code.");
     expect(String(body.instructions)).not.toContain("<total_tokens>");
     const input = userTurns(body);
@@ -174,18 +189,22 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
     expect(input.some(item => item.role === "user" && item !== last)).toBe(true);
   });
 
-  test("without metadata.user_id a trailing total_tokens suffix is not relocated", () => {
-    const system = ["You are Claude Code.", footer(8000)].join("\n\n");
+  test("without metadata.user_id a trailing N tokens left suffix still relocates", () => {
+    const latest = footer(15_000_000);
+    const system = ["You are Claude Code.", latest].join("\n\n");
     const { body } = translate(system);
-    expect(body.instructions).toBe(system);
-    expect(userTurns(body)).toEqual([
-      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-    ]);
+    expect(body.instructions).toBe("You are Claude Code.");
+    const input = userTurns(body);
+    expect(input[input.length - 1]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: latest }],
+    });
   });
 
   test("fenced standalone total_tokens example is a translator no-op", () => {
     const system = ["You are a docs bot.", "```", footer(123), "```", ""].join("\n");
-    const { body } = translateClaudeCode(system);
+    const { body } = translate(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
@@ -194,17 +213,17 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
 
   test("open fence to EOF with a trailing total_tokens tag is not relocated", () => {
     const system = ["You are a docs bot.", "```", footer(123)].join("\n");
-    const { body } = translateClaudeCode(system);
+    const { body } = translate(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
     ]);
   });
 
-  test("real footer after a closed fence still relocates on the Claude Code path", () => {
+  test("real footer after a closed fence still relocates without metadata.user_id", () => {
     const docs = ["Docs:", "```", footer(123), "```"].join("\n");
     const latest = footer(8000);
-    const { body } = translateClaudeCode(`${docs}\n\n${latest}`);
+    const { body } = translate(`${docs}\n\n${latest}`);
     expect(body.instructions).toBe(docs);
     const input = userTurns(body);
     expect(input[input.length - 1]).toEqual({
@@ -229,15 +248,15 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
     expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
-    expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
+    expect(keyOf([stable, footer(15_000_000)].join("\n\n"))).toBe(stableKey);
   });
 
-  test("Desktop prompt_cache_key fallback hashes raw systemParts including footers", () => {
+  test("Desktop prompt_cache_key fallback hashes stabilized instructions, not total_tokens footers", () => {
     const stable = "You are Claude Code.";
     const keyOf = (system: string) => translate(system).body.prompt_cache_key as string;
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
-    expect(keyOf(stable)).toBe(stableKey);
-    expect(keyOf([stable, footer(8000)].join("\n\n"))).not.toBe(stableKey);
+    expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
+    expect(keyOf([stable, footer(15_000_000)].join("\n\n"))).toBe(stableKey);
   });
 });
