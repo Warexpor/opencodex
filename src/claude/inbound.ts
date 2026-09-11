@@ -349,8 +349,9 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
   const joinedSystem = systemParts.length > 0 ? systemParts.join("\n\n") : "";
   // Trailing-notice peel is identified by harness shape (unfenced
   // `<total_tokens>N tokens left</total_tokens>` or the exact TaskCreate
-  // reminder), not by metadata.user_id. Desktop has no session id but still
-  // receives the same system join, so it must peel too.
+  // reminder — legacy and Claude Code 2.1.263+ wording), not by
+  // metadata.user_id. Desktop has no session id but still receives the
+  // same system join, so it must peel too.
   let stabilizedInstructions = "";
   if (joinedSystem) {
     // Claude Code appends growing <total_tokens> footers (and occasional

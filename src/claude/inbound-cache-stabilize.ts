@@ -10,13 +10,34 @@
  * footers are `<total_tokens>N tokens left</total_tokens>` (not a bare integer).
  * An unmatched fence opener covers through EOF. No match → the original
  * string is returned byte-for-byte.
+ *
+ * TaskCreate nudge text has drifted across Claude Code builds; match the
+ * known exact paragraphs (legacy + 2.1.263 "tracking progress" form) as
+ * trailing alternatives so a mid-session nudge cannot pin older footers
+ * above it and flip `instructions` after a previously stable peel.
  */
 
 const TRAILING_TOTAL_RE =
   /(?:^|(?:\r?\n)+)[ \t]*(<total_tokens>\d+ tokens left<\/total_tokens>)[ \t]*(?:\r?\n)*$/;
 
-const TRAILING_NUDGE_RE =
-  /(?:^|(?:\r?\n)+)[ \t]*(The task tools haven't been used recently\.\s+If you're working on tasks that would benefit from tracking, consider using TaskCreate to add them\.\s+Only use these if relevant to the current work\.\s+This is just a gentle reminder - ignore if not applicable\.)[ \t]*(?:\r?\n)*$/;
+/** Legacy Claude Code TaskCreate reminder (pre-"tracking progress"). */
+const TASKCREATE_NUDGE_LEGACY =
+  "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking, consider using TaskCreate to add them. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.";
+
+/**
+ * Claude Code 2.1.263+ TaskCreate reminder observed on hitrate S/T4
+ * (FREEZE-DIFF + tip0847 pilots). Mentions TaskUpdate and stale-list cleanup.
+ */
+const TASKCREATE_NUDGE_CC_2_1_263 =
+  "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.";
+
+const TRAILING_NUDGE_RE = new RegExp(
+  `(?:^|(?:\\r?\\n)+)[ \\t]*(${escapeRegExp(TASKCREATE_NUDGE_LEGACY)}|${escapeRegExp(TASKCREATE_NUDGE_CC_2_1_263)})[ \\t]*(?:\\r?\\n)*$`,
+);
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 interface FenceRange {
   start: number;

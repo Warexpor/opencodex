@@ -21,7 +21,8 @@ Measured cache-hit rates on Muse Spark 1.3 via OpenCode Go / OpenCodex:
 | Grok Build (n=75) | 0.966526 | 0.941345 |
 
 Cause: Anthropic→Responses conversion stores Claude system text in `instructions`;
-Claude Code appends growing `<total_tokens>` (and rare TaskCreate nudges), so
+Claude Code appends growing `<total_tokens>` (and rare TaskCreate nudges —
+legacy wording and Claude Code 2.1.263+ "tracking progress"/TaskUpdate), so
 `instructions_sha` changes every turn. Grok traffic has no `instructions` field
 and is the control.
 
