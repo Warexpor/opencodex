@@ -9,6 +9,13 @@ const TASKCREATE_NUDGE = [
   "Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.",
 ].join(" ");
 
+/** Claude Code 2.1.263+ wording (hitrate tip0847 / FREEZE-DIFF S/T4). */
+const TASKCREATE_NUDGE_CC_2_1_263 = [
+  "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done).",
+  "Also consider cleaning up the task list if it has become stale.",
+  "Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.",
+].join(" ");
+
 function footer(used: number): string {
   return `<total_tokens>${used} tokens left</total_tokens>`;
 }
@@ -130,6 +137,20 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
     expect(result.dynamicNotice).toBe(TASKCREATE_NUDGE);
   });
 
+  test("Claude Code 2.1.263 TaskCreate nudge peels and unpins older tokens-left footers", () => {
+    const stable = "You are Claude Code.";
+    const older = footer(15_000_000);
+    const mid = footer(14_980_071);
+    const latest = footer(14_997_176);
+    const result = stabilizeClaudeInstructionsForPromptCache(
+      [stable, older, mid, TASKCREATE_NUDGE_CC_2_1_263, latest].join("\n\n"),
+    );
+    expect(result.instructions).toBe(stable);
+    expect(result.instructions).not.toContain("<total_tokens>");
+    expect(result.instructions).not.toContain("TaskCreate");
+    expect(result.dynamicNotice).toBe(`${latest}\n\n${TASKCREATE_NUDGE_CC_2_1_263}`);
+  });
+
   test("latest footer and latest nudge both surface in the notice", () => {
     const stable = "Stay stable.";
     const older = footer(10);
@@ -139,6 +160,18 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
     );
     expect(result.instructions).toBe(stable);
     expect(result.dynamicNotice).toBe(`${latest}\n\n${TASKCREATE_NUDGE}`);
+  });
+
+  test("legacy and 2.1.263 nudges both leave the same stable instructions prefix", () => {
+    const stable = "Stay stable.";
+    const a = stabilizeClaudeInstructionsForPromptCache(
+      [stable, footer(1), TASKCREATE_NUDGE, footer(2)].join("\n\n"),
+    );
+    const b = stabilizeClaudeInstructionsForPromptCache(
+      [stable, footer(1), TASKCREATE_NUDGE_CC_2_1_263, footer(9)].join("\n\n"),
+    );
+    expect(a.instructions).toBe(stable);
+    expect(b.instructions).toBe(stable);
   });
 
   test("inline documentation of total_tokens tags stays in instructions", () => {
