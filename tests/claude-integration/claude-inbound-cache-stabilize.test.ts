@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { stabilizeClaudeInstructionsForPromptCache } from "../../src/claude/inbound-cache-stabilize";
 import { anthropicToResponsesTranslation } from "../../src/claude/inbound";
+import { repoPath } from "../helpers/repo-root";
 
 const TASKCREATE_NUDGE = [
   "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking, consider using TaskCreate to add them.",
@@ -11,14 +13,39 @@ function footer(used: number): string {
   return `<total_tokens>${used} tokens left</total_tokens>`;
 }
 
-function translate(system: string, metadata?: { user_id: string }) {
-  return anthropicToResponsesTranslation({
-    model: "m",
-    max_tokens: 1,
-    system,
-    messages: [{ role: "user", content: "hi" }],
-    ...(metadata ? { metadata } : {}),
-  });
+function translate(
+  system: string,
+  options?: { user_id?: string; stabilizePromptCache?: boolean },
+) {
+  return anthropicToResponsesTranslation(
+    {
+      model: "m",
+      max_tokens: 1,
+      system,
+      messages: [{ role: "user", content: "hi" }],
+      ...(options?.user_id ? { metadata: { user_id: options.user_id } } : {}),
+    },
+    undefined,
+    undefined,
+    options?.stabilizePromptCache === undefined
+      ? undefined
+      : { stabilizePromptCache: options.stabilizePromptCache },
+  );
+}
+
+function translateHarness(system: string, metadata?: { user_id: string }) {
+  return anthropicToResponsesTranslation(
+    {
+      model: "m",
+      max_tokens: 1,
+      system,
+      messages: [{ role: "user", content: "hi" }],
+      ...(metadata ? { metadata } : {}),
+    },
+    undefined,
+    undefined,
+    { stabilizePromptCache: true },
+  );
 }
 
 function userTurns(body: { input: unknown }) {
@@ -169,10 +196,29 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
 });
 
 describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
-  test("relocates the latest total_tokens footer onto a trailing input user message", () => {
+  test("ordinary caller with the exact unfenced suffix keeps instructions and input unchanged", () => {
+    const latest = footer(15_000_000);
+    const system = ["You are Claude Code.", latest].join("\n\n");
+    const { body } = translate(system);
+    expect(body.instructions).toBe(system);
+    expect(userTurns(body)).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    ]);
+  });
+
+  test("ordinary caller with the exact TaskCreate paragraph keeps instructions and input unchanged", () => {
+    const system = ["You are Claude Code.", TASKCREATE_NUDGE].join("\n\n");
+    const { body } = translate(system);
+    expect(body.instructions).toBe(system);
+    expect(userTurns(body)).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    ]);
+  });
+
+  test("opted-in harness relocates the latest total_tokens footer onto a trailing input user message", () => {
     const first = footer(1000);
     const latest = footer(8000);
-    const { body } = translate(["You are Claude Code.", first, latest].join("\n\n"));
+    const { body } = translateHarness(["You are Claude Code.", first, latest].join("\n\n"));
     expect(body.instructions).toBe("You are Claude Code.");
     expect(String(body.instructions)).not.toContain("<total_tokens>");
     const input = userTurns(body);
@@ -185,9 +231,9 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
     expect(input.some(item => item.role === "user" && item !== last)).toBe(true);
   });
 
-  test("peel does not require metadata.user_id", () => {
+  test("opted-in peel does not require metadata.user_id", () => {
     const latest = footer(14_980_071);
-    const { body } = translate(["You are Claude Code.", latest].join("\n\n"));
+    const { body } = translateHarness(["You are Claude Code.", latest].join("\n\n"));
     expect(body.instructions).toBe("You are Claude Code.");
     const input = userTurns(body);
     expect(input[input.length - 1]).toEqual({
@@ -197,9 +243,9 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
     });
   });
 
-  test("fenced standalone total_tokens example is a translator no-op", () => {
+  test("fenced standalone total_tokens example is a translator no-op when opted in", () => {
     const system = ["You are a docs bot.", "```", footer(123), "```", ""].join("\n");
-    const { body } = translate(system);
+    const { body } = translateHarness(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
@@ -208,17 +254,17 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
 
   test("open fence to EOF with a trailing total_tokens tag is not relocated", () => {
     const system = ["You are a docs bot.", "```", footer(123)].join("\n");
-    const { body } = translate(system);
+    const { body } = translateHarness(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
     ]);
   });
 
-  test("real footer after a closed fence still relocates", () => {
+  test("real footer after a closed fence still relocates when opted in", () => {
     const docs = ["Docs:", "```", footer(123), "```"].join("\n");
     const latest = footer(8000);
-    const { body } = translate(`${docs}\n\n${latest}`);
+    const { body } = translateHarness(`${docs}\n\n${latest}`);
     expect(body.instructions).toBe(docs);
     const input = userTurns(body);
     expect(input[input.length - 1]).toEqual({
@@ -240,19 +286,42 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
   test("Claude Code session prompt_cache_key is unchanged across trailing footers", () => {
     const stable = "You are Claude Code.";
     const keyOf = (system: string) =>
-      translate(system, { user_id: "user-abc" }).body.prompt_cache_key as string;
+      translateHarness(system, { user_id: "user-abc" }).body.prompt_cache_key as string;
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
     expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
     expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
   });
 
-  test("Desktop prompt_cache_key fallback hashes stabilized instructions, not total_tokens footers", () => {
+  test("outside opt-in, Desktop prompt_cache_key hashes raw systemParts including footers", () => {
     const stable = "You are Claude Code.";
     const keyOf = (system: string) => translate(system).body.prompt_cache_key as string;
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(keyOf(stable)).toBe(stableKey);
+    expect(keyOf([stable, footer(8000)].join("\n\n"))).not.toBe(stableKey);
+  });
+
+  test("opted-in Desktop prompt_cache_key hashes stabilized instructions, not total_tokens footers", () => {
+    const stable = "You are Claude Code.";
+    const keyOf = (system: string) => translateHarness(system).body.prompt_cache_key as string;
+    const stableKey = keyOf(stable);
+    expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
     expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
     expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
+  });
+
+  test("outside opt-in, a no-match Desktop key differs from the opted-in instructions-string key", () => {
+    const system = "You are Claude Code.\n\nPrefer terse answers.";
+    const rawKey = translate(system).body.prompt_cache_key as string;
+    const optedInKey = translateHarness(system).body.prompt_cache_key as string;
+    expect(rawKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(optedInKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(rawKey).not.toBe(optedInKey);
+  });
+
+  test("Claude Code /v1/messages inbound opts into prompt-cache stabilize", () => {
+    const source = readFileSync(repoPath("src/server/claude-messages.ts"), "utf8");
+    expect(source).toContain("stabilizePromptCache: true");
   });
 });

@@ -289,11 +289,24 @@ export interface ClaudeInboundTranslation {
 }
 
 /**
+ * Translator-level opt-in for Claude Code harness footer relocation.
+ * Default is off: a matching textual suffix is not permission to change its role.
+ * The `/v1/messages` inbound path passes true. Do not infer this from metadata.user_id.
+ */
+export interface ClaudeInboundTranslateOptions {
+  stabilizePromptCache?: boolean;
+}
+
+/**
  * Translate an Anthropic Messages request body into a /v1/responses request body.
  * Throws AnthropicRequestError (-> 400 invalid_request_error) on malformed input.
  */
-export function anthropicToResponsesBody(raw: unknown, cc?: OcxClaudeCodeConfig): Rec {
-  return anthropicToResponsesTranslation(raw, cc).body;
+export function anthropicToResponsesBody(
+  raw: unknown,
+  cc?: OcxClaudeCodeConfig,
+  options?: ClaudeInboundTranslateOptions,
+): Rec {
+  return anthropicToResponsesTranslation(raw, cc, undefined, options).body;
 }
 
 /**
@@ -301,16 +314,26 @@ export function anthropicToResponsesBody(raw: unknown, cc?: OcxClaudeCodeConfig)
  * OUT-OF-BODY tuple (audit 133 R3#1 — an in-body marker would leak upstream through
  * the native Responses forward and 400).
  */
-export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCodeConfig, budget?: TranslatorBudget): ClaudeInboundTranslation {
+export function anthropicToResponsesTranslation(
+  raw: unknown,
+  cc?: OcxClaudeCodeConfig,
+  budget?: TranslatorBudget,
+  options?: ClaudeInboundTranslateOptions,
+): ClaudeInboundTranslation {
   const activeBudget = budget ?? createTranslatorBudget();
   try {
-    return translateAnthropicRequest(raw, cc, activeBudget);
+    return translateAnthropicRequest(raw, cc, activeBudget, options);
   } finally {
     if (!budget) activeBudget.dispose();
   }
 }
 
-function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undefined, budget: TranslatorBudget): ClaudeInboundTranslation {
+function translateAnthropicRequest(
+  raw: unknown,
+  cc: OcxClaudeCodeConfig | undefined,
+  budget: TranslatorBudget,
+  options?: ClaudeInboundTranslateOptions,
+): ClaudeInboundTranslation {
   if (!isRec(raw)) throw new AnthropicRequestError("request body must be a JSON object");
   if (typeof raw.model !== "string" || raw.model.length === 0) {
     throw new AnthropicRequestError("model is required");
@@ -347,23 +370,30 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
   };
 
   const joinedSystem = systemParts.length > 0 ? systemParts.join("\n\n") : "";
-  let stabilizedInstructions = "";
+  const stabilizePromptCache = options?.stabilizePromptCache === true;
+  // Desktop fallback hashes raw systemParts unless the caller opted into
+  // harness cleanup. Opt-in then hashes the same string as body.instructions.
+  let cacheSystem: string | string[] = systemParts;
   if (joinedSystem) {
-    // Claude Code appends growing <total_tokens>N tokens left</total_tokens>
-    // footers (and occasional TaskCreate nudges) into system text. That churn
-    // breaks Muse/Go prefix cache on the Responses instructions prefix even
-    // when tools stay stable. The trailing unfenced harness shape is the
-    // provenance signal; the helper is a no-op unless that suffix is present.
-    const stabilized = stabilizeClaudeInstructionsForPromptCache(joinedSystem);
-    if (stabilized.instructions) body.instructions = stabilized.instructions;
-    if (stabilized.dynamicNotice) {
-      input.push({
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: stabilized.dynamicNotice }],
-      });
+    if (stabilizePromptCache) {
+      // Claude Code appends growing <total_tokens>N tokens left</total_tokens>
+      // footers (and occasional TaskCreate nudges) into system text. That churn
+      // breaks Muse/Go prefix cache on the Responses instructions prefix even
+      // when tools stay stable. Relocation is caller-opted, not inferred from
+      // a matching suffix or metadata.user_id.
+      const stabilized = stabilizeClaudeInstructionsForPromptCache(joinedSystem);
+      if (stabilized.instructions) body.instructions = stabilized.instructions;
+      if (stabilized.dynamicNotice) {
+        input.push({
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: stabilized.dynamicNotice }],
+        });
+      }
+      cacheSystem = stabilized.instructions;
+    } else {
+      body.instructions = joinedSystem;
     }
-    stabilizedInstructions = stabilized.instructions;
   }
 
   const tools = toolsToResponses(raw.tools);
@@ -402,14 +432,14 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     // Exact-prefix matching still isolates content; the key only steers routing
     // affinity. Callers must NOT synthesize a session_id header from this fallback
     // (audit 133 R2#3).
-    // Claude Code uses metadata.user_id session key above. Desktop fallback
-    // hashes the same string used for body.instructions (stabilized remainder
-    // when a trailing harness footer was peeled, otherwise the raw join).
+    // Outside opt-in, hash the raw systemParts array (pre-stabilize Desktop
+    // key). Opt-in hashes the same string used for body.instructions so the
+    // key tracks the cacheable prefix after peel.
     body.prompt_cache_key = createHash("sha256")
       .update(canonicalJson({
         version: 2,
         model: body.model,
-        system: stabilizedInstructions,
+        system: cacheSystem,
         tools: Array.isArray(body.tools) ? body.tools : [],
       }))
       .digest("hex").slice(0, 32);

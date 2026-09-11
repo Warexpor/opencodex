@@ -8,8 +8,9 @@
  * Relocation is identified by harness shape: only a trailing, unfenced,
  * canonical notice at the end of instructions is moved. An unmatched fence
  * opener covers through EOF. No match → the original string is returned
- * byte-for-byte. The positive ID is that trailing shape (Claude Code writes
- * `<total_tokens>N tokens left</total_tokens>`), not a request-level gate.
+ * byte-for-byte. The matcher is content identity only; `translateAnthropicRequest`
+ * must pass `stabilizePromptCache: true` before this helper runs. Claude Code
+ * writes `<total_tokens>N tokens left</total_tokens>`.
  */
 
 const TRAILING_TOTAL_RE =

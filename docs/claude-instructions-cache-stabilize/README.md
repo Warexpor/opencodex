@@ -8,6 +8,14 @@ causes prompt-cache misses on Muse/Go.
 This change strips those dynamic footers from `instructions` and reattaches the
 latest notice as a trailing `input` message so the cacheable prefix stays stable.
 
+Relocation is opt-in: `translateAnthropicRequest` / `anthropicToResponsesTranslation`
+take `stabilizePromptCache?: boolean` (default **false**). Ordinary Anthropic
+callers keep a matching suffix in `instructions`. The Claude Code `/v1/messages`
+inbound path passes `true`. The matcher is `<total_tokens>N tokens left</total_tokens>`
+plus the exact TaskCreate paragraph; it is not gated on `metadata.user_id`.
+Outside opt-in, the Desktop `prompt_cache_key` fallback hashes raw `systemParts`.
+When opted in, that fallback hashes the same string as `body.instructions`.
+
 ## Paper
 
 See [PAPER_OCXFIX.pdf](./PAPER_OCXFIX.pdf) (Warexpor).

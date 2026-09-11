@@ -755,7 +755,9 @@ async function handleClaudeMessagesWithBudget(
       };
       delete anthropicBody.thinking;
     }
-    const translation = anthropicToResponsesTranslation(anthropicBody, config.claudeCode, translatorBudget);
+    const translation = anthropicToResponsesTranslation(anthropicBody, config.claudeCode, translatorBudget, {
+      stabilizePromptCache: true,
+    });
     internalBody = translation.body;
     // The Anthropic translator builds its body from model/input/store/stream plus sampling
     // fields only, so the caller intent is applied to the TRANSLATED body rather than the
