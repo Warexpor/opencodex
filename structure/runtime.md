@@ -509,3 +509,11 @@ stamps the configured key selected for the physical request. `src/server/request
 retains per-key attempt usage, and `src/usage/log.ts` validates and persists labels. The
 [account attribution contract](gui-and-management-api.md#upstream-key-account-attribution)
 defines identity, unknown records, and aggregation boundaries.
+
+## Explicit SOCKS5 CLI selection
+
+`src/cli/start-args.ts` parses `ocx start --socks5 [host:port]` and the mutually
+exclusive `--socks5-off`. The start owner persists only an explicitly requested
+change; the off flag refuses to erase a non-SOCKS proxy. Invalid-address errors
+never echo user-supplied credentials, and status messages redact proxy URLs.
+The parser regression cases live in `tests/cli/start-args.test.ts`.

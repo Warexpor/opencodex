@@ -1,5 +1,7 @@
 {
   "key-attribution.test.ts": "usage",
+  "socks5-fetch.test.ts": "lib",
+  "start-args.test.ts": "cli",
   "responses-core-modules.test.ts": "responses",
   "responses-spend-ledger-wiring.test.ts": "responses",
   "responses-send-budget-errors.test.ts": "responses",
