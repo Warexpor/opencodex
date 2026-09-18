@@ -267,6 +267,33 @@ export function formatAnthropicErrorBody(status: number, _headers: Headers, payl
   return redactSecretString(detail).slice(0, 400);
 }
 
+function isAnthropicContentFilterStopReason(
+  stopReason: string | undefined,
+): stopReason is "refusal" | "content_filter" {
+  return stopReason === "refusal" || stopReason === "content_filter";
+}
+
+/**
+ * Anthropic `refusal` / `content_filter` is a permanent sampling decision, not a disconnect.
+ * Emitting `done` with that stopReason used to surface as `response.incomplete` without
+ * `retryable`, which Codex treats as a dropped stream and retries five times (#4312).
+ * The explicit incomplete event is what the bridge already forwards into
+ * `incomplete_details.retryable`. Usage is preserved: a filtered turn still consumed tokens.
+ * `max_tokens` stays a `done` so the client can continue from a legitimate truncation.
+ */
+function anthropicContentFilterIncomplete(
+  stopReason: string,
+  usage: OcxUsage | undefined,
+): Extract<AdapterEvent, { type: "incomplete" }> {
+  return {
+    type: "incomplete",
+    reason: "content_filter",
+    retryable: false,
+    message: `upstream ended the turn with stop_reason "${stopReason}"`,
+    usage,
+  };
+}
+
 function isAnthropicRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -566,16 +593,28 @@ function defaultReasoningEffort(provider: OcxProviderConfig, modelId: string): s
   return trimmed;
 }
 
-function usageFromAnthropic(usage: Record<string, number> | undefined): OcxUsage | undefined {
-  if (!usage) return undefined;
+function usageFromAnthropic(usage: unknown): OcxUsage | undefined {
+  if (!isAnthropicRecord(usage)) return undefined;
+  const tokens = (key: string): number | undefined => {
+    const value = usage[key];
+    if (value === undefined) return 0;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  };
+  const input = tokens("input_tokens");
+  const output = tokens("output_tokens");
+  const read = tokens("cache_read_input_tokens");
+  const write = tokens("cache_creation_input_tokens");
+  // Invalid upstream usage is unreported, not a measured zero or a string that
+  // can pass through aggregation into a human-readable usage report.
+  if (input === undefined || output === undefined || read === undefined || write === undefined) return undefined;
   const hasCache = usage.cache_read_input_tokens !== undefined || usage.cache_creation_input_tokens !== undefined;
-  const read = usage.cache_read_input_tokens ?? 0;
-  const write = usage.cache_creation_input_tokens ?? 0;
   // Anthropic reports input_tokens EXCLUSIVE of cache read/write; normalize to the
   // canonical inclusive convention (types.ts OcxUsage / devlog 070).
+  const inputTokens = input + read + write;
+  if (!Number.isFinite(inputTokens)) return undefined;
   return {
-    inputTokens: (usage.input_tokens ?? 0) + read + write,
-    outputTokens: usage.output_tokens ?? 0,
+    inputTokens,
+    outputTokens: output,
     ...(hasCache ? {
       cachedInputTokens: read,
       cacheReadInputTokens: read,
@@ -584,15 +623,18 @@ function usageFromAnthropic(usage: Record<string, number> | undefined): OcxUsage
   };
 }
 
-function mergeAnthropicUsage(
-  base: Record<string, number> | undefined,
-  next: Record<string, number> | undefined,
-): Record<string, number> | undefined {
-  if (!next) return base;
-  if (!base) return { ...next };
+type PendingAnthropicUsage = Record<string, unknown> | null | undefined;
+
+function mergeAnthropicUsage(base: PendingAnthropicUsage, next: unknown): PendingAnthropicUsage {
+  // null remembers an invalid observation. A later partial cumulative frame
+  // cannot re-establish the missing totals, while an absent update changes nothing.
+  if (base === null) return null;
+  if (next === undefined) return base;
+  if (!isAnthropicRecord(next)) return null;
   // Anthropic `message_delta.usage` values are CUMULATIVE; adding them to the
   // message_start snapshot double-counted output tokens. Later frames win per key.
-  return { ...base, ...next };
+  const merged = { ...base, ...next };
+  return usageFromAnthropic(merged) === undefined ? null : merged;
 }
 
 function buildToolNameTransforms(provider: OcxProviderConfig): { toWire: (name: string) => string; fromWire: (name: string) => string } {
@@ -1004,6 +1046,22 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         else if (tc === "required") body.tool_choice = { type: "any" };
         else if (isAllowedToolChoice(tc)) body.tool_choice = { type: tc.mode === "required" ? "any" : "auto" };
         else if (typeof tc === "object" && "name" in tc) body.tool_choice = { type: "tool", name: toolNames.toWire(resolveToolChoiceWireName(parsed.context.tools, tc.name)) };
+      } else if (tools && parsed.options.parallelToolCalls === false) {
+        // The caller asked for one tool call at a time but sent no explicit choice.
+        // Anthropic carries that intent INSIDE tool_choice, so the implicit default
+        // has to be stated before the flag has somewhere to live.
+        body.tool_choice = { type: "auto" };
+      }
+      // disable_parallel_tool_use is nested in tool_choice and caps the model at one
+      // tool call for auto/any/tool. Under type "none" tool use is already off, so the
+      // flag is irrelevant there, and with no tools on the wire no tool_choice exists.
+      // This constrains the model's OUTPUT, not execution order: sequential tool use is
+      // enforced by the caller returning each tool_result before the next request.
+      const settledToolChoice = body.tool_choice as { type?: string } | undefined;
+      if (parsed.options.parallelToolCalls === false
+          && settledToolChoice !== undefined
+          && settledToolChoice.type !== "none") {
+        body.tool_choice = { ...settledToolChoice, disable_parallel_tool_use: true };
       }
 
       const url = anthropicMessagesUrl(provider.baseUrl);
@@ -1059,7 +1117,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       let currentToolCallId = "";
       let currentToolCallName = "";
       let currentToolCallJson = "";
-      let pendingUsage: Record<string, number> | undefined;
+      let pendingUsage: PendingAnthropicUsage;
       let pendingStopReason: string | undefined;
       let emittedDone = false;
       let sawVisibleText = false;
@@ -1077,6 +1135,13 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
             errorType: "upstream_error",
             usage: usageFromAnthropic(pendingUsage),
           };
+          return;
+        }
+        // Refusal / content_filter must not look like a dropped stream. `done` with that
+        // stopReason becomes `response.incomplete` without `retryable`, and Codex retries
+        // the same refusal five times (#4312).
+        if (isAnthropicContentFilterStopReason(pendingStopReason)) {
+          yield anthropicContentFilterIncomplete(pendingStopReason, usageFromAnthropic(pendingUsage));
           return;
         }
         yield {
@@ -1113,7 +1178,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
 
         switch (record.event || data.type) {
               case "message_start": {
-                const message = data.message as { usage?: Record<string, number> } | undefined;
+                const message = data.message as { usage?: unknown } | undefined;
                 pendingUsage = mergeAnthropicUsage(pendingUsage, message?.usage);
                 break;
               }
@@ -1202,7 +1267,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
                 break;
               }
               case "message_delta": {
-                const usage = data.usage as Record<string, number> | undefined;
+                const usage = data.usage;
                 pendingUsage = mergeAnthropicUsage(pendingUsage, usage);
                 const delta = data.delta as { stop_reason?: unknown } | undefined;
                 if (typeof delta?.stop_reason === "string") pendingStopReason = delta.stop_reason;
@@ -1253,16 +1318,19 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
             };
             return;
           }
-          const stopReason = pendingStopReason === "max_tokens"
-            ? "max_tokens"
-            : pendingStopReason === "refusal" || pendingStopReason === "content_filter"
-              ? "content_filter"
-              : pendingStopReason;
+          // Same rule as emitDone: refusal / content_filter is a permanent decision, not a
+          // disconnect. This branch bypasses emitDone, so the check has to be repeated here
+          // or the EOF route still emits `done` and Codex retries the refusal (#4312).
+          if (isAnthropicContentFilterStopReason(pendingStopReason)) {
+            emittedDone = true;
+            yield anthropicContentFilterIncomplete(pendingStopReason, usageFromAnthropic(pendingUsage));
+            return;
+          }
           emittedDone = true;
           yield {
             type: "done",
             usage: usageFromAnthropic(pendingUsage),
-            ...(stopReason ? { stopReason } : {}),
+            ...(pendingStopReason ? { stopReason: pendingStopReason } : {}),
           };
         } else if (provider.anthropicEofTolerance === true) {
           // AgentRouter-style compatibility profile (#658): the upstream can close the stream
@@ -1305,7 +1373,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         }];
       }
       const json = parsed;
-      const responseBytes = new TextEncoder().encode(JSON.stringify(json)).byteLength;
+      const responseBytes = Buffer.byteLength(JSON.stringify(json), "utf8");
       budget.chargeRetained(responseBytes, { kind: "retained_collectors" });
       try {
       const events: AdapterEvent[] = [];
@@ -1375,6 +1443,15 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           errorType: "upstream_error",
           usage: usageFromAnthropic(usage),
         });
+        retainTranslatedEventBatch(events, budget);
+        return events;
+      }
+      // Same rule as the streaming terminals: a refusal is explicit and non-retryable.
+      // Leaving it as `done` hides `retryable: false` and Codex retries the filtered
+      // turn as if the stream dropped (#4312). Partial content above is already in
+      // `events`; the incomplete event carries usage the same way `done` did.
+      if (isAnthropicContentFilterStopReason(stopReason)) {
+        events.push(anthropicContentFilterIncomplete(stopReason, usageFromAnthropic(usage)));
         retainTranslatedEventBatch(events, budget);
         return events;
       }

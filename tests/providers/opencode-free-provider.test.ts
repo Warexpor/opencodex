@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
+import { OPENCODE_ZEN_USER_AGENT } from "../../src/providers/opencode-zen-transport";
 import { providerConfigSeed, deriveKeyLoginMap, deriveFeaturedProviderIds } from "../../src/providers/derive";
 import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { routedProviderConfig } from "../../src/router";
@@ -31,14 +32,14 @@ describe("opencode-free provider", () => {
 
   test("static headers include only the public client markers", () => {
     expect(entry?.staticHeaders?.["Authorization"]).toBeUndefined();
-    expect(entry?.staticHeaders?.["User-Agent"]).toBe("opencode");
+    expect(entry?.staticHeaders?.["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
     expect(entry?.staticHeaders?.["x-opencode-client"]).toBe("cli");
   });
 
   test("providerConfigSeed propagates static headers", () => {
     const seed = providerConfigSeed(entry!);
     expect(seed.headers?.["Authorization"]).toBeUndefined();
-    expect(seed.headers?.["User-Agent"]).toBe("opencode");
+    expect(seed.headers?.["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
     expect(seed.headers?.["x-opencode-client"]).toBe("cli");
     expect(seed.keyOptional).toBe(true);
     expect(seed.liveModels).toBe(true);
@@ -59,7 +60,7 @@ describe("opencode-free provider", () => {
     const req = adapter.buildRequest(minimalRequest());
     const headers = req.headers as Record<string, string>;
     expect(headers["Authorization"]).toBeUndefined();
-    expect(headers["User-Agent"]).toBe("opencode");
+    expect(headers["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
     expect(headers["x-opencode-client"]).toBe("cli");
     expect(req.url).toBe("https://opencode.ai/zen/v1/chat/completions");
   });
@@ -104,20 +105,20 @@ describe("opencode-free provider", () => {
 
     test("a config saved with no header block gains the full registry set", () => {
       const routed = routedProviderConfig("opencode-free", persisted());
-      expect(routed.headers?.["User-Agent"]).toBe("opencode");
+      expect(routed.headers?.["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
       expect(routed.headers?.["x-opencode-client"]).toBe("cli");
     });
 
     test("a config saved with only the older marker gains the new one", () => {
       const routed = routedProviderConfig("opencode-free", persisted({ "x-opencode-client": "cli" }));
-      expect(routed.headers?.["User-Agent"]).toBe("opencode");
+      expect(routed.headers?.["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
       expect(routed.headers?.["x-opencode-client"]).toBe("cli");
     });
 
     test("the merged headers reach the wire, not just the resolved config", () => {
       const routed = routedProviderConfig("opencode-free", persisted({ "x-opencode-client": "cli" }));
       const req = createOpenAIChatAdapter(routed).buildRequest(minimalRequest());
-      expect((req.headers as Record<string, string>)["User-Agent"]).toBe("opencode");
+      expect((req.headers as Record<string, string>)["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
     });
 
     test("a user override wins and does not become a second comma-joined value", () => {
@@ -137,7 +138,7 @@ describe("opencode-free provider", () => {
       // A provider identified as `opencode` when it completes but anonymous when it lists its
       // own models reads as two different clients to an upstream rate limiter.
       const req = buildModelsRequest(persisted({ "x-opencode-client": "cli" }), undefined, "opencode-free");
-      expect(req.headers["User-Agent"]).toBe("opencode");
+      expect(req.headers["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
       expect(req.headers["x-opencode-client"]).toBe("cli");
     });
 
@@ -194,14 +195,15 @@ describe("opencode-free provider", () => {
     };
 
     const body = JSON.parse(createOpenAIChatAdapter(provider).buildRequest(request).body as string) as {
-      tools: Array<{ function: { parameters: Record<string, unknown> } }>;
+      tools: Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
     };
+    const byName = Object.fromEntries(body.tools.map(tool => [tool.function.name, tool.function.parameters]));
 
-    expect(body.tools[0].function.parameters.type).toBe("object");
-    expect(body.tools[0].function.parameters.properties).toEqual({ a: { type: "string" } });
-    expect(body.tools[1].function.parameters.type).toBe("object");
-    expect(body.tools[1].function.parameters.oneOf).toBeUndefined();
-    expect(body.tools[1].function.parameters.properties).toEqual({
+    expect(byName.arr?.type).toBe("object");
+    expect(byName.arr?.properties).toEqual({ a: { type: "string" } });
+    expect(byName.comp?.type).toBe("object");
+    expect(byName.comp?.oneOf).toBeUndefined();
+    expect(byName.comp?.properties).toEqual({
       x: { type: "string" },
       y: { type: "number" },
     });

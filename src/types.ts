@@ -16,6 +16,7 @@ export {
   isAllowedToolChoice,
   toolChoiceToolPredicate,
   declaresCodeModeExec,
+  NAMESPACED_BARE_ALIAS_EXCLUDED_NAMES,
 } from "./types/tools";
 
 export type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } from "./types/wire";
@@ -74,6 +75,7 @@ export type {
   OcxAccountPoolQuotaWindow,
   OcxComboStrategy,
   OcxComboDefaultEffort,
+  OcxComboDefaultEffortMode,
   OcxComboReasoningEffortMode,
   OcxComboTarget,
   OcxComboConfig,
@@ -101,6 +103,8 @@ export type {
   ResponsesItemIdRepairConfig,
   RateLimitRetryPolicy,
   TransientRetryPolicy,
+  ProviderWebSearchBridgeBackend,
+  ProviderWebSearchBridgeConfig,
   ProviderCostOverlay,
   RequestPacingRule,
   ProviderRequestPacingConfig,
@@ -109,7 +113,10 @@ export type {
   TierObservationContext,
   TierDecision,
   OcxProviderConfig,
+  ModelCapabilities,
 } from "./types/provider";
+
+export { PROVIDER_WEB_SEARCH_BRIDGE_BACKENDS } from "./types/provider";
 
 export type {
   CodexAccount,

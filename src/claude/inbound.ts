@@ -151,10 +151,17 @@ function blockedSkillCallIds(messages: readonly unknown[], blocked: readonly str
 
 /**
  * Claude Code (observed 2026-07-11, real CLI smoke) sends `role:"system"` entries in
- * `messages` despite the published API having no system role. Map them to Responses
- * instructions text: the native ChatGPT backend rejects system message items in
- * `input` ("System messages are not allowed", verified live), so folding into
- * `instructions` is the only shape that works on every route.
+ * `messages` despite the published API having no system role. They are emitted as
+ * chronological `role:"developer"` input items, which keeps the timeline intact and
+ * leaves `instructions` owned solely by the top-level Anthropic `system` field.
+ *
+ * The original mapping folded them into `instructions` because the native ChatGPT
+ * backend rejects `role:"system"` items in `input` ("System messages are not allowed",
+ * verified live). That constraint is real and still respected — but it only rules out
+ * `system`, not `developer`, which every Responses route accepts. Folding meant each
+ * mid-conversation reminder mutated the prompt head, invalidating the upstream KV
+ * prefix and rotating the Desktop `prompt_cache_key` fallback below on every turn
+ * (#4148).
  */
 function systemMessageText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -292,7 +299,10 @@ export interface ClaudeInboundTranslation {
  * Translate an Anthropic Messages request body into a /v1/responses request body.
  * Throws AnthropicRequestError (-> 400 invalid_request_error) on malformed input.
  */
-export function anthropicToResponsesBody(raw: unknown, cc?: OcxClaudeCodeConfig): Rec {
+export function anthropicToResponsesBody(
+  raw: unknown,
+  cc?: OcxClaudeCodeConfig,
+): Rec {
   return anthropicToResponsesTranslation(raw, cc).body;
 }
 
@@ -301,7 +311,11 @@ export function anthropicToResponsesBody(raw: unknown, cc?: OcxClaudeCodeConfig)
  * OUT-OF-BODY tuple (audit 133 R3#1 — an in-body marker would leak upstream through
  * the native Responses forward and 400).
  */
-export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCodeConfig, budget?: TranslatorBudget): ClaudeInboundTranslation {
+export function anthropicToResponsesTranslation(
+  raw: unknown,
+  cc?: OcxClaudeCodeConfig,
+  budget?: TranslatorBudget,
+): ClaudeInboundTranslation {
   const activeBudget = budget ?? createTranslatorBudget();
   try {
     return translateAnthropicRequest(raw, cc, activeBudget);
@@ -310,7 +324,11 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   }
 }
 
-function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undefined, budget: TranslatorBudget): ClaudeInboundTranslation {
+function translateAnthropicRequest(
+  raw: unknown,
+  cc: OcxClaudeCodeConfig | undefined,
+  budget: TranslatorBudget,
+): ClaudeInboundTranslation {
   if (!isRec(raw)) throw new AnthropicRequestError("request body must be a JSON object");
   if (typeof raw.model !== "string" || raw.model.length === 0) {
     throw new AnthropicRequestError("model is required");
@@ -334,7 +352,12 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, budget);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
-      if (text.length > 0) systemParts.push(text);
+      // Keep it where the client put it. `developer` is first-class in the Responses
+      // schema and survives parseRequest as a chronological message, where `system`
+      // would be re-hoisted back onto the system prompt and defeat the point.
+      if (text.length > 0) {
+        input.push({ type: "message", role: "developer", content: [{ type: "input_text", text }] });
+      }
     }
     else throw new AnthropicRequestError(`unsupported message role: ${String(msg.role)}`);
   }
@@ -349,15 +372,12 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
   const joinedSystem = systemParts.length > 0 ? systemParts.join("\n\n") : "";
   // Trailing-notice peel is identified by harness shape (unfenced
   // `<total_tokens>N tokens left</total_tokens>` or the exact TaskCreate
-  // reminder — legacy and Claude Code 2.1.263+ wording), not by
-  // metadata.user_id. Desktop has no session id but still receives the
-  // same system join, so it must peel too.
-  let stabilizedInstructions = "";
+  // reminder), not by metadata.user_id and not by `stabilizePromptCache`.
+  // Desktop has no session id but still receives the same system join, so it
+  // must peel too. Otherwise the growing footer rotates the metadata-less
+  // prompt_cache_key and misses the prefix cache.
+  let cacheSystem: string | string[] = systemParts;
   if (joinedSystem) {
-    // Claude Code appends growing <total_tokens> footers (and occasional
-    // TaskCreate nudges) into system text. That churn breaks Muse/Go prefix
-    // cache on the Responses instructions prefix even when tools stay stable.
-    // Peel only a trailing unfenced harness notice; otherwise keep the join.
     const stabilized = stabilizeClaudeInstructionsForPromptCache(joinedSystem);
     if (stabilized.instructions) body.instructions = stabilized.instructions;
     if (stabilized.dynamicNotice) {
@@ -367,7 +387,7 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
         content: [{ type: "input_text", text: stabilized.dynamicNotice }],
       });
     }
-    stabilizedInstructions = stabilized.instructions;
+    cacheSystem = stabilized.instructions;
   }
 
   const tools = toolsToResponses(raw.tools);
@@ -407,13 +427,13 @@ function translateAnthropicRequest(raw: unknown, cc: OcxClaudeCodeConfig | undef
     // affinity. Callers must NOT synthesize a session_id header from this fallback
     // (audit 133 R2#3).
     // Desktop has no metadata.user_id so it uses this fallback. Hash the same
-    // string used for instructions after stabilize so key routing tracks the
-    // cacheable prefix. Claude Code uses the session key above instead.
+    // string used for instructions after the harness peel so key routing tracks
+    // the cacheable prefix. Claude Code uses the session key above instead.
     body.prompt_cache_key = createHash("sha256")
       .update(canonicalJson({
         version: 2,
         model: body.model,
-        system: stabilizedInstructions,
+        system: cacheSystem,
         tools: Array.isArray(body.tools) ? body.tools : [],
       }))
       .digest("hex").slice(0, 32);

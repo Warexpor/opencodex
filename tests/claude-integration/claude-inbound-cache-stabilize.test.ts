@@ -1,4 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadConfig, saveConfig } from "../../src/config";
+import { handleClaudeMessages } from "../../src/server/claude-messages";
+import type { OcxConfig, OcxClaudeCodeConfig } from "../../src/types";
+import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { beforeEach, afterEach, describe, expect, test } from "bun:test";
 import { stabilizeClaudeInstructionsForPromptCache } from "../../src/claude/inbound-cache-stabilize";
 import { anthropicToResponsesTranslation } from "../../src/claude/inbound";
 
@@ -18,18 +27,35 @@ function footer(used: number): string {
   return `<total_tokens>${used} tokens left</total_tokens>`;
 }
 
-function translate(system: string, metadata?: { user_id: string }) {
-  return anthropicToResponsesTranslation({
-    model: "m",
-    max_tokens: 1,
-    system,
-    messages: [{ role: "user", content: "hi" }],
-    ...(metadata ? { metadata } : {}),
-  });
+function translate(
+  system: string,
+  options?: { user_id?: string; stabilizePromptCache?: boolean },
+) {
+  return anthropicToResponsesTranslation(
+    {
+      model: "m",
+      max_tokens: 1,
+      system,
+      messages: [{ role: "user", content: "hi" }],
+      ...(options?.user_id ? { metadata: { user_id: options.user_id } } : {}),
+    },
+    options?.stabilizePromptCache === undefined
+      ? undefined
+      : { stabilizePromptCache: options.stabilizePromptCache },
+  );
 }
 
-function translateClaudeCode(system: string) {
-  return translate(system, { user_id: "user-abc" });
+function translateHarness(system: string, metadata?: { user_id: string }) {
+  return anthropicToResponsesTranslation(
+    {
+      model: "m",
+      max_tokens: 1,
+      system,
+      messages: [{ role: "user", content: "hi" }],
+      ...(metadata ? { metadata } : {}),
+    },
+    { stabilizePromptCache: true },
+  );
 }
 
 function userTurns(body: { input: unknown }) {
@@ -81,16 +107,16 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
     expect(result.dynamicNotice).toBe(third);
   });
 
-  test("live Claude Code remaining-tokens footer peels", () => {
+  test("real Claude Code 15000000 tokens left trailing footer peels", () => {
     const stable = "You are Claude Code.";
-    const live = footer(15_000_000);
-    const result = stabilizeClaudeInstructionsForPromptCache(`${stable}\n\n${live}`);
+    const harness = footer(15_000_000);
+    const result = stabilizeClaudeInstructionsForPromptCache(`${stable}\n\n${harness}`);
     expect(result.instructions).toBe(stable);
     expect(result.dynamicNotice).toBe("<total_tokens>15000000 tokens left</total_tokens>");
   });
 
-  test("trailing bare-digit total_tokens tag is not a harness suffix", () => {
-    const docs = "You are Claude Code.\n\n<total_tokens>15000000</total_tokens>";
+  test("bare numeric total_tokens without tokens left is not a harness footer", () => {
+    const docs = "You are Claude Code.\n\n<total_tokens>123</total_tokens>";
     const result = stabilizeClaudeInstructionsForPromptCache(docs);
     expect(result.instructions).toBe(docs);
     expect(result.dynamicNotice).toBeNull();
@@ -152,7 +178,7 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
   });
 
   test("inline documentation of total_tokens tags stays in instructions", () => {
-    const docs = "The harness may emit a <total_tokens>123 tokens left</total_tokens> footer; do not invent one.";
+    const docs = "The harness may emit a <total_tokens>123</total_tokens> footer; do not invent one.";
     const result = stabilizeClaudeInstructionsForPromptCache(docs);
     expect(result.instructions).toBe(docs);
     expect(result.dynamicNotice).toBeNull();
@@ -173,7 +199,7 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
   });
 
   test("docs plus a real trailing footer keep the docs and move only the latest footer", () => {
-    const docs = "Describe <total_tokens>0 tokens left</total_tokens> in the protocol guide.";
+    const docs = "Describe <total_tokens>0</total_tokens> in the protocol guide.";
     const latest = footer(8000);
     const result = stabilizeClaudeInstructionsForPromptCache(
       [docs, footer(1), latest].join("\n\n"),
@@ -205,24 +231,49 @@ describe("stabilizeClaudeInstructionsForPromptCache", () => {
   });
 });
 
-describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
-  test("relocates the latest total_tokens footer onto a trailing input user message", () => {
-    const first = footer(1000);
-    const latest = footer(8000);
-    const { body } = translate(["You are Claude Code.", first, latest].join("\n\n"));
-    expect(body.instructions).toBe("You are Claude Code.");
-    expect(String(body.instructions)).not.toContain("<total_tokens>");
-    const input = userTurns(body);
-    const last = input[input.length - 1]!;
-    expect(last).toEqual({
-      type: "message",
-      role: "user",
-      content: [{ type: "input_text", text: latest }],
+describe("linear canonical notice extraction", () => {
+  for (const separator of ["\n", "\r\n", "\t", "\f", "  "]) {
+    test(`noncanonical inner separator ${JSON.stringify(separator)} is preserved`, () => {
+      const system = `System.\n\n<total_tokens>123${separator}tokens left</total_tokens>`;
+      expect(stabilizeClaudeInstructionsForPromptCache(system)).toEqual({ instructions: system, dynamicNotice: null });
+      const body = translateHarness(system).body;
+      expect(body.instructions).toBe(system);
+      expect(body.input).toHaveLength(1);
     });
-    expect(input.some(item => item.role === "user" && item !== last)).toBe(true);
-  });
+  }
 
-  test("without metadata.user_id a trailing N tokens left suffix still relocates", () => {
+  test("retains prefix trailing spaces after a successful peel and failed next candidate", () => {
+    expect(stabilizeClaudeInstructionsForPromptCache(`System.  \n\n${footer(1)}`)).toEqual({
+      instructions: "System.  ", dynamicNotice: footer(1),
+    });
+  });
+  test("CRLF separators and horizontal padding retain the canonical notice", () => {
+    expect(stabilizeClaudeInstructionsForPromptCache(`System.\r\n\r\n \t${footer(1)}\t \r\n`)).toEqual({
+      instructions: "System.", dynamicNotice: footer(1),
+    });
+  });
+  test("malformed notice before a valid suffix remains byte-for-byte", () => {
+    const prefix = `System.  \n<total_tokens>123\ntokens left</total_tokens>  `;
+    expect(stabilizeClaudeInstructionsForPromptCache(`${prefix}\n${footer(2)}`)).toEqual({
+      instructions: prefix, dynamicNotice: footer(2),
+    });
+  });
+  test("a whitespace-only trailing line and lone CR are not canonical separators", () => {
+    for (const system of [`System.\n${footer(1)}\n \n`, `System.\n${footer(1)}\r`]) {
+      expect(stabilizeClaudeInstructionsForPromptCache(system)).toEqual({ instructions: system, dynamicNotice: null });
+    }
+  });
+  test("twenty thousand notices after many fences keep only the latest without repeated prefix scans", () => {
+    const prefix = "System.\n" + ("```xml\nexample\n```\n").repeat(2_000) + "Stable.  ";
+    const notices = Array.from({ length: 20_000 }, (_, index) => footer(index));
+    expect(stabilizeClaudeInstructionsForPromptCache(`${prefix}\n\n${notices.join("\n")}`)).toEqual({
+      instructions: prefix, dynamicNotice: footer(19_999),
+    });
+  });
+});
+
+describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
+  test("ordinary caller with the exact unfenced suffix relocates the footer", () => {
     const latest = footer(15_000_000);
     const system = ["You are Claude Code.", latest].join("\n\n");
     const { body } = translate(system);
@@ -235,9 +286,49 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
     });
   });
 
-  test("fenced standalone total_tokens example is a translator no-op", () => {
-    const system = ["You are a docs bot.", "```", footer(123), "```", ""].join("\n");
+  test("ordinary caller with the exact TaskCreate paragraph relocates the nudge", () => {
+    const system = ["You are Claude Code.", TASKCREATE_NUDGE].join("\n\n");
     const { body } = translate(system);
+    expect(body.instructions).toBe("You are Claude Code.");
+    const input = userTurns(body);
+    expect(input[input.length - 1]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: TASKCREATE_NUDGE }],
+    });
+  });
+
+  test("opted-in harness relocates the latest total_tokens footer onto a trailing input user message", () => {
+    const first = footer(1000);
+    const latest = footer(8000);
+    const { body } = translateHarness(["You are Claude Code.", first, latest].join("\n\n"));
+    expect(body.instructions).toBe("You are Claude Code.");
+    expect(String(body.instructions)).not.toContain("<total_tokens>");
+    const input = userTurns(body);
+    const last = input[input.length - 1]!;
+    expect(last).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: latest }],
+    });
+    expect(input.some(item => item.role === "user" && item !== last)).toBe(true);
+  });
+
+  test("opted-in peel does not require metadata.user_id", () => {
+    const latest = footer(14_980_071);
+    const { body } = translateHarness(["You are Claude Code.", latest].join("\n\n"));
+    expect(body.instructions).toBe("You are Claude Code.");
+    const input = userTurns(body);
+    expect(input[input.length - 1]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: latest }],
+    });
+  });
+
+  test("fenced standalone total_tokens example is a translator no-op when opted in", () => {
+    const system = ["You are a docs bot.", "```", footer(123), "```", ""].join("\n");
+    const { body } = translateHarness(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
@@ -246,17 +337,17 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
 
   test("open fence to EOF with a trailing total_tokens tag is not relocated", () => {
     const system = ["You are a docs bot.", "```", footer(123)].join("\n");
-    const { body } = translate(system);
+    const { body } = translateHarness(system);
     expect(body.instructions).toBe(system);
     expect(userTurns(body)).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
     ]);
   });
 
-  test("real footer after a closed fence still relocates without metadata.user_id", () => {
+  test("real footer after a closed fence still relocates when opted in", () => {
     const docs = ["Docs:", "```", footer(123), "```"].join("\n");
     const latest = footer(8000);
-    const { body } = translate(`${docs}\n\n${latest}`);
+    const { body } = translateHarness(`${docs}\n\n${latest}`);
     expect(body.instructions).toBe(docs);
     const input = userTurns(body);
     expect(input[input.length - 1]).toEqual({
@@ -277,19 +368,142 @@ describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
 
   test("Claude Code session prompt_cache_key is unchanged across trailing footers", () => {
     const stable = "You are Claude Code.";
-    const keyOf = (system: string) => translateClaudeCode(system).body.prompt_cache_key as string;
+    const keyOf = (system: string) =>
+      translateHarness(system, { user_id: "user-abc" }).body.prompt_cache_key as string;
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
     expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
-    expect(keyOf([stable, footer(15_000_000)].join("\n\n"))).toBe(stableKey);
+    expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
   });
 
-  test("Desktop prompt_cache_key fallback hashes stabilized instructions, not total_tokens footers", () => {
+  test("Desktop prompt_cache_key stays stable across trailing footers without an opt-in flag", () => {
     const stable = "You are Claude Code.";
     const keyOf = (system: string) => translate(system).body.prompt_cache_key as string;
     const stableKey = keyOf(stable);
     expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(keyOf(stable)).toBe(stableKey);
+    expect(keyOf([stable, footer(8000)].join("\n\n"))).toBe(stableKey);
+  });
+
+  test("opted-in Desktop prompt_cache_key hashes stabilized instructions, not total_tokens footers", () => {
+    const stable = "You are Claude Code.";
+    const keyOf = (system: string) => translateHarness(system).body.prompt_cache_key as string;
+    const stableKey = keyOf(stable);
+    expect(stableKey).toMatch(/^[0-9a-f]{32}$/);
     expect(keyOf([stable, footer(1000), footer(8000)].join("\n\n"))).toBe(stableKey);
-    expect(keyOf([stable, footer(15_000_000)].join("\n\n"))).toBe(stableKey);
+    expect(keyOf([stable, footer(99999)].join("\n\n"))).toBe(stableKey);
+  });
+
+  test("a no-match Desktop key matches the instructions-string key with or without the flag", () => {
+    const system = "You are Claude Code.\n\nPrefer terse answers.";
+    const rawKey = translate(system).body.prompt_cache_key as string;
+    const optedInKey = translateHarness(system).body.prompt_cache_key as string;
+    expect(rawKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(optedInKey).toBe(rawKey);
+  });
+
+});
+
+describe("Messages operator opt-in at the outbound boundary", () => {
+  const originalFetch = globalThis.fetch;
+  let isolatedHome: IsolatedCodexHome | undefined;
+  let previousHome: string | undefined;
+  let configHome: string | undefined;
+
+  beforeEach(() => {
+    previousHome = process.env.OPENCODEX_HOME;
+    isolatedHome = installIsolatedCodexHome("ocx-prefix-contract-");
+    configHome = mkdtempSync(join(tmpdir(), "ocx-prefix-config-"));
+    process.env.OPENCODEX_HOME = configHome;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    isolatedHome?.restore();
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (configHome) removeTreeWithRetry(configHome);
+  });
+
+  async function outbound(system: string, enabled?: boolean) {
+    const captured: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://prefix.example/v1/responses");
+      captured.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ id: "resp_prefix", object: "response", status: "completed",
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+        usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 } });
+    }) as typeof fetch;
+    const config = {
+      providers: { prefix: { adapter: "openai-responses", authMode: "key", baseUrl: "https://prefix.example/v1", apiKey: "test-key", models: ["m"] } },
+      ...(enabled === undefined ? {} : { claudeCode: { stabilizePromptCache: enabled } }),
+    } as OcxConfig;
+    const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "prefix/m", max_tokens: 32, system,
+        messages: [{ role: "user", content: "hi" }], stream: false }),
+    }), config, { model: "", provider: "" });
+    await response.text();
+    expect(response.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    return captured[0]!;
+  }
+
+  for (const enabled of [undefined, false] as const) {
+    test(`ordinary HTTP caller relocates the footer with setting ${String(enabled)}`, async () => {
+      const notice = footer(15_000_000);
+      const wire = await outbound(`System.\n\n${notice}`, enabled);
+      expect(wire.instructions).toBe("System.");
+      expect(wire.input).toEqual([
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: notice }] },
+      ]);
+      const expectedKey = createHash("sha256").update(JSON.stringify({
+        model: "prefix/m",
+        system: "System.",
+        tools: [],
+        version: 2,
+      })).digest("hex").slice(0, 32);
+      expect(wire.prompt_cache_key).toBe(expectedKey);
+    });
+  }
+
+  for (const notice of [footer(15_000_000), TASKCREATE_NUDGE, TASKCREATE_NUDGE_CC_2_1_263]) {
+    test(`explicit HTTP opt-in relocates supported notice ${notice.slice(0, 35)}`, async () => {
+      const wire = await outbound(`System.\n\n${notice}`, true);
+      expect(wire.instructions).toBe("System.");
+      expect(wire.input).toEqual([
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: notice }] },
+      ]);
+    });
+  }
+
+  test("opted-in HTTP caller preserves an open fenced example", async () => {
+    const system = `Docs:\n\x60\x60\x60xml\n${footer(1)}`;
+    const wire = await outbound(system, true);
+    expect(wire.instructions).toBe(system);
+    expect(wire.input).toHaveLength(1);
+  });
+
+  test("explicit setting survives actual config save/load without enabling other configs", () => {
+    const config = loadConfig();
+    config.claudeCode = { ...config.claudeCode, stabilizePromptCache: true };
+    saveConfig(config);
+    expect(loadConfig().claudeCode?.stabilizePromptCache).toBe(true);
+    config.claudeCode.stabilizePromptCache = false;
+    saveConfig(config);
+    expect(loadConfig().claudeCode?.stabilizePromptCache).toBe(false);
+  });
+
+  test("a non-boolean stabilizePromptCache value does not disable relocation", () => {
+    const notice = footer(1);
+    const system = `System.\n\n${notice}`;
+    const config = JSON.parse('{"stabilizePromptCache":"true"}') as OcxClaudeCodeConfig;
+    const { body } = anthropicToResponsesTranslation({ model: "m", system, messages: [{ role: "user", content: "hi" }] }, config);
+    expect(body.instructions).toBe("System.");
+    expect(body.input).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: notice }] },
+    ]);
   });
 });

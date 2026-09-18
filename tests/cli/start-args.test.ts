@@ -74,3 +74,16 @@ describe("normalizeSocks5", () => {
     expect(() => normalizeSocks5("socks5://127.0.0.1:0")).toThrow("Invalid SOCKS5 address");
   });
 });
+
+test("invalid SOCKS addresses never echo embedded credentials", () => {
+  for (const value of ["socks5://user:private-secret@host:0", "user:private-secret@host:bad"]) {
+    try {
+      normalizeSocks5(value);
+      throw new Error("invalid address was accepted");
+    } catch (error) {
+      expect(error).toBeInstanceOf(StartArgsError);
+      expect((error as Error).message).toContain("Invalid SOCKS5 address");
+      expect((error as Error).message).not.toContain("private-secret");
+    }
+  }
+});

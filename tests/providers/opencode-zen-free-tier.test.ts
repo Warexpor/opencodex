@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
 import { providerConfigSeed } from "../../src/providers/derive";
 import {
+  applyOpenCodeZenFreeTierBody,
   deriveOpenCodeZenSessionId,
+  isOpenCodeZenIdentifier,
+  OPENCODE_ZEN_USER_AGENT,
   resolveOpenCodeZenTransport,
 } from "../../src/providers/opencode-zen-transport";
 import { PROVIDER_REGISTRY, getProviderRegistryEntry } from "../../src/providers/registry";
@@ -21,7 +24,7 @@ describe("opencode zen free-tier path", () => {
   test("opencode-zen and opencode-free stamp CLI identity statically", () => {
     for (const id of ["opencode-zen", "opencode-free"] as const) {
       const entry = PROVIDER_REGISTRY.find(e => e.id === id);
-      expect(entry?.staticHeaders?.["User-Agent"]).toBe("opencode");
+      expect(entry?.staticHeaders?.["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
       expect(entry?.staticHeaders?.["x-opencode-client"]).toBe("cli");
       expect(entry?.modelWireDefaults?.["muse-spark-1.3-contributor-free"]).toBe("openai-responses");
       expect(entry?.modelDefaultReasoningEfforts?.["muse-spark-1.3-contributor-free"]).toBe("minimal");
@@ -35,6 +38,7 @@ describe("opencode zen free-tier path", () => {
     expect(a).toBe(b);
     expect(a).not.toBe(c);
     expect(a.startsWith("ses_")).toBe(true);
+    expect(isOpenCodeZenIdentifier(a, "ses")).toBe(true);
 
     const entry = getProviderRegistryEntry("opencode-zen")!;
     const base = { ...providerConfigSeed(entry), apiKey: "key-a" };
@@ -42,9 +46,10 @@ describe("opencode zen free-tier path", () => {
     const twice = resolveOpenCodeZenTransport(base);
     expect(once.headers?.["x-opencode-session"]).toBe(a);
     expect(twice.headers?.["x-opencode-session"]).toBe(a);
-    expect(once.headers?.["x-opencode-request"]?.startsWith("msg_")).toBe(true);
+    expect(isOpenCodeZenIdentifier(once.headers?.["x-opencode-request"] ?? "", "msg")).toBe(true);
     expect(once.headers?.["x-opencode-request"]).not.toBe(twice.headers?.["x-opencode-request"]);
     expect(once.headers?.["x-opencode-project"]).toBe("global");
+    expect(once.headers?.["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
   });
 
   test("legacy desktop client marker is upgraded to cli at settle time", () => {
@@ -54,6 +59,35 @@ describe("opencode zen free-tier path", () => {
       headers: { "x-opencode-client": "desktop", "User-Agent": "opencode" },
     });
     expect(provider.headers?.["x-opencode-client"]).toBe("cli");
+    expect(provider.headers?.["User-Agent"]).toBe(OPENCODE_ZEN_USER_AGENT);
+  });
+
+  test("a versioned OpenCode user agent at or above 1.18.0 is left alone", () => {
+    const entry = getProviderRegistryEntry("opencode-free")!;
+    const provider = resolveOpenCodeZenTransport({
+      ...providerConfigSeed(entry),
+      headers: { "User-Agent": "opencode/1.18.4" },
+    });
+    expect(provider.headers?.["User-Agent"]).toBe("opencode/1.18.4");
+  });
+
+  test("an invalid inbound session id is replaced with Identifier.create form", () => {
+    const entry = getProviderRegistryEntry("opencode-zen")!;
+    const kept = deriveOpenCodeZenSessionId("keep-session");
+    const valid = resolveOpenCodeZenTransport({
+      ...providerConfigSeed(entry),
+      headers: { "x-opencode-session": kept },
+    });
+    expect(valid.headers?.["x-opencode-session"]).toBe(kept);
+
+    const replaced = resolveOpenCodeZenTransport({
+      ...providerConfigSeed(entry),
+      apiKey: "replace-session",
+      headers: { "x-opencode-session": `ses_${"ab".repeat(12)}` },
+    });
+    const session = replaced.headers?.["x-opencode-session"] ?? "";
+    expect(session).not.toBe(`ses_${"ab".repeat(12)}`);
+    expect(isOpenCodeZenIdentifier(session, "ses")).toBe(true);
   });
 
   test("explicit non-desktop client overrides survive", () => {
@@ -88,8 +122,14 @@ describe("opencode zen free-tier path", () => {
     });
     const adapter = withTestTranslatorBudget(createResponsesPassthroughAdapter(provider));
     const req = adapter.buildRequest(parsed);
-    const body = JSON.parse(String(req.body)) as { reasoning?: { effort?: string } };
+    const body = JSON.parse(String(req.body)) as {
+      reasoning?: { effort?: string };
+      stream?: boolean;
+      tools?: Array<{ name?: string }>;
+    };
     expect(body.reasoning?.effort).toBe("minimal");
+    expect(body.stream).toBe(true);
+    expect(body.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining(["bash", "grep", "write"]));
     expect(req.url).toBe("https://opencode.ai/zen/v1/responses");
   });
 
@@ -101,8 +141,10 @@ describe("opencode zen free-tier path", () => {
     } as unknown as OcxConfig;
 
     let seen: Headers | undefined;
+    let seenBody = "";
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       seen = new Headers(init?.headers);
+      seenBody = typeof init?.body === "string" ? init.body : "";
       return Response.json({
         id: "chatcmpl_test",
         object: "chat.completion",
@@ -126,11 +168,28 @@ describe("opencode zen free-tier path", () => {
     );
     expect(res.status).toBe(200);
     await res.text();
-    expect(seen?.get("user-agent")).toBe("opencode");
+    expect(seen?.get("user-agent")).toBe(OPENCODE_ZEN_USER_AGENT);
     expect(seen?.get("x-opencode-client")).toBe("cli");
-    expect(seen?.get("x-opencode-session")?.startsWith("ses_")).toBe(true);
-    expect(seen?.get("x-opencode-request")?.startsWith("msg_")).toBe(true);
+    expect(isOpenCodeZenIdentifier(seen?.get("x-opencode-session") ?? "", "ses")).toBe(true);
+    expect(isOpenCodeZenIdentifier(seen?.get("x-opencode-request") ?? "", "msg")).toBe(true);
     expect(seen?.get("x-opencode-project")).toBe("global");
+    const upstream = JSON.parse(seenBody) as {
+      stream?: boolean;
+      tools?: Array<{ function?: { name?: string } }>;
+    };
+    expect(upstream.stream).toBe(true);
+    expect(upstream.tools?.[0]?.function?.name).toBe("bash");
+    expect(upstream.tools?.some(tool => tool.function?.name === "grep")).toBe(true);
+  });
+
+  test("paid Zen models do not inherit the free-tier tool catalog", () => {
+    const shaped = applyOpenCodeZenFreeTierBody(
+      { model: "gpt-5.4", messages: [], stream: false },
+      "chat",
+      "gpt-5.4",
+    );
+    expect(shaped.stream).toBe(false);
+    expect(shaped.tools).toBeUndefined();
   });
 
   test("non-zen providers are untouched by zen transport", () => {

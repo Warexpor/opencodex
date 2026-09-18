@@ -6,10 +6,11 @@
  * surface the latest notice on `input` instead.
  *
  * Relocation is identified by harness shape: only a trailing, unfenced,
- * canonical notice at the end of instructions is moved. Live Claude Code
- * footers are `<total_tokens>N tokens left</total_tokens>` (not a bare integer).
- * An unmatched fence opener covers through EOF. No match → the original
- * string is returned byte-for-byte.
+ * canonical notice at the end of instructions is moved. An unmatched fence
+ * opener covers through EOF. No match → the original string is returned
+ * byte-for-byte. The matcher is content identity only; `translateAnthropicRequest`
+ * requires `claudeCode.stabilizePromptCache: true` before this helper runs. Claude Code
+ * writes `<total_tokens>N tokens left</total_tokens>`.
  *
  * TaskCreate nudge text has drifted across Claude Code builds; match the
  * known exact paragraphs (legacy + 2.1.263 "tracking progress" form) as
@@ -17,8 +18,7 @@
  * above it and flip `instructions` after a previously stable peel.
  */
 
-const TRAILING_TOTAL_RE =
-  /(?:^|(?:\r?\n)+)[ \t]*(<total_tokens>\d+ tokens left<\/total_tokens>)[ \t]*(?:\r?\n)*$/;
+const TOTAL_NOTICE_RE = /^<total_tokens>[0-9]+ tokens left<\/total_tokens>$/;
 
 /** Legacy Claude Code TaskCreate reminder (pre-"tracking progress"). */
 const TASKCREATE_NUDGE_LEGACY =
@@ -30,14 +30,6 @@ const TASKCREATE_NUDGE_LEGACY =
  */
 const TASKCREATE_NUDGE_CC_2_1_263 =
   "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.";
-
-const TRAILING_NUDGE_RE = new RegExp(
-  `(?:^|(?:\\r?\\n)+)[ \\t]*(${escapeRegExp(TASKCREATE_NUDGE_LEGACY)}|${escapeRegExp(TASKCREATE_NUDGE_CC_2_1_263)})[ \\t]*(?:\\r?\\n)*$`,
-);
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 interface FenceRange {
   start: number;
@@ -87,62 +79,52 @@ function fencedRanges(source: string): FenceRange[] {
   return ranges;
 }
 
-function isInsideFence(ranges: readonly FenceRange[], index: number): boolean {
-  return ranges.some(range => index >= range.start && index < range.end);
-}
-
-function peelOne(
-  rest: string,
-  ranges: readonly FenceRange[],
-): { rest: string; total?: string; nudge?: string } | null {
-  const total = rest.match(TRAILING_TOTAL_RE);
-  if (total?.[1]) {
-    const matchStart = rest.length - total[0].length;
-    const tagAt = matchStart + total[0].indexOf(total[1]);
-    if (!isInsideFence(ranges, tagAt)) {
-      return { rest: rest.slice(0, rest.length - total[0].length), total: total[1] };
-    }
-  }
-  const nudge = rest.match(TRAILING_NUDGE_RE);
-  if (nudge?.[1]) {
-    const matchStart = rest.length - nudge[0].length;
-    const tagAt = matchStart + nudge[0].indexOf(nudge[1]);
-    if (!isInsideFence(ranges, tagAt)) {
-      return { rest: rest.slice(0, rest.length - nudge[0].length), nudge: nudge[1] };
-    }
-  }
-  return null;
-}
-
+/** A backwards cursor consumes each line and fence range at most once. */
 export function stabilizeClaudeInstructionsForPromptCache(
   instructions: string,
 ): { instructions: string; dynamicNotice: string | null } {
-  if (!instructions) {
-    return { instructions: "", dynamicNotice: null };
-  }
-
   const ranges = fencedRanges(instructions);
-  let rest = instructions;
+  let fenceIndex = ranges.length - 1;
+  let end = instructions.length;
   let latestTotal: string | null = null;
   let latestNudge: string | null = null;
   let peeled = false;
+
   for (;;) {
-    const next = peelOne(rest, ranges);
-    if (!next) break;
+    // This is speculative: a failed candidate must not trim the retained prefix.
+    let lineEnd = end;
+    while (lineEnd > 0 && instructions[lineEnd - 1] === "\n") {
+      lineEnd--;
+      if (lineEnd > 0 && instructions[lineEnd - 1] === "\r") lineEnd--;
+    }
+    if (lineEnd === 0) break;
+    const lineStart = instructions.lastIndexOf("\n", lineEnd - 1) + 1;
+    let contentStart = lineStart;
+    let contentEnd = lineEnd;
+    while (contentStart < contentEnd && (instructions[contentStart] === " " || instructions[contentStart] === "\t")) contentStart++;
+    while (contentEnd > contentStart && (instructions[contentEnd - 1] === " " || instructions[contentEnd - 1] === "\t")) contentEnd--;
+    const notice = instructions.slice(contentStart, contentEnd);
+    const total = TOTAL_NOTICE_RE.test(notice);
+    const nudge = notice === TASKCREATE_NUDGE_LEGACY || notice === TASKCREATE_NUDGE_CC_2_1_263;
+    if (!total && !nudge) break;
+
+    while (fenceIndex >= 0 && ranges[fenceIndex]!.start > contentStart) fenceIndex--;
+    if (fenceIndex >= 0 && contentStart < ranges[fenceIndex]!.end) break;
+    if (total && latestTotal === null) latestTotal = notice;
+    if (nudge && latestNudge === null) latestNudge = notice;
     peeled = true;
-    rest = next.rest;
-    if (next.total && latestTotal === null) latestTotal = next.total;
-    if (next.nudge && latestNudge === null) latestNudge = next.nudge;
+
+    // Commit only the recognized notice and its immediately preceding LF/CRLF separators.
+    end = lineStart;
+    while (end > 0 && instructions[end - 1] === "\n") {
+      end--;
+      if (end > 0 && instructions[end - 1] === "\r") end--;
+    }
   }
 
-  if (!peeled) {
-    return { instructions, dynamicNotice: null };
-  }
-
+  if (!peeled) return { instructions, dynamicNotice: null };
   const noticeParts: string[] = [];
   if (latestTotal) noticeParts.push(latestTotal);
   if (latestNudge) noticeParts.push(latestNudge);
-  const dynamicNotice = noticeParts.length > 0 ? noticeParts.join("\n\n") : null;
-
-  return { instructions: rest, dynamicNotice };
+  return { instructions: instructions.slice(0, end), dynamicNotice: noticeParts.join("\n\n") };
 }

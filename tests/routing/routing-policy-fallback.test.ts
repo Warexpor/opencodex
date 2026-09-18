@@ -5,6 +5,7 @@ import { RequestPacingQueueOverloadError } from "../../src/providers/request-pac
 import type { OcxConfig } from "../../src/types";
 import { beginRequestAttempt, type RequestLogContext } from "../../src/server/request-log";
 import type { RouteDecisionTraceV1 } from "../../src/routing/trace";
+import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import {
   handleResponsesWithPolicyFallback,
   rankPolicyFallbackCandidates,
@@ -47,6 +48,36 @@ function seedAttempt(logCtx: RequestLogContext, provider: string, model: string)
 }
 
 describe("policy candidate fallback", () => {
+  test("policy hops retain only the original sidecar snapshot outside primary headers", async () => {
+    const authorization = `Bearer ${fakeChatGptJwt({ chatgpt_account_id: "sidecar-account" })}`;
+    const initial = request();
+    const headers = new Headers(initial.headers);
+    headers.set("authorization", authorization);
+    headers.set("chatgpt-account-id", "sidecar-account");
+    const log = { model: "", provider: "" } as RequestLogContext;
+    const snapshots: unknown[] = [];
+    const primaryAuth: Array<string | null> = [];
+    const response = await handleResponsesWithPolicyFallback(new Request(initial, { headers }), {
+      port: 0, defaultProvider: "provider-a", providers: {},
+    }, log, {}, {
+      runCore: async (req, _config, context, options) => {
+        snapshots.push(options.openAiSidecarAuth);
+        primaryAuth.push(req.headers.get("authorization"));
+        context.routeDecision = policyTrace();
+        return snapshots.length === 1
+          ? Response.json({ error: { message: "retry next candidate" } }, { status: 503 })
+          : Response.json({ status: "completed" });
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(primaryAuth).toEqual([authorization, null]);
+    expect(snapshots).toEqual([
+      { authorization, chatgptAccountId: "sidecar-account" },
+      { authorization, chatgptAccountId: "sidecar-account" },
+    ]);
+    expect(snapshots[1]).toBe(snapshots[0]);
+  });
+
   test("ranks only eligible untried candidates by score and stable original order", () => {
     const ranked = rankPolicyFallbackCandidates(policyTrace(), new Set(["provider-a\u0000model-a"]));
     expect(ranked.map(candidate => `${candidate.provider}/${candidate.model}`)).toEqual([
@@ -111,9 +142,10 @@ describe("policy candidate fallback", () => {
     expect(response.status).toBe(400);
     expect(seenModels).toEqual(["policy/daily"]);
   });
-  test("an upstream context_length_exceeded still stops the chain (#1524)", async () => {
-    // The mirror-image contract. An upstream verdict is about the REQUEST, so retrying it
-    // elsewhere is guesswork -- and hopping would burn every candidate on a doomed request.
+  test("an upstream context_length_exceeded advances to the next policy candidate", async () => {
+    // A context verdict is about THIS model's window, not about the request in the abstract:
+    // the next candidate may be able to hold the same turn. Traversal stays finite because
+    // `tried` admits each candidate once, and nothing has been sent to the client yet.
     const trace = policyTrace();
     const logCtx = { requestedModel: "policy/daily", routeDecision: trace, attempts: [] } as unknown as RequestLogContext;
     const seenModels: string[] = [];
@@ -122,31 +154,44 @@ describe("policy candidate fallback", () => {
       seenModels.push(String(body.model));
       ctx.routeDecision = trace;
       seedAttempt(ctx, "provider", String(body.model));
-      return Response.json(
-        { error: { message: "context length exceeded", type: "invalid_request_error", code: "context_length_exceeded" } },
-        { status: 400 },
-      );
+      if (seenModels.length === 1) {
+        return Response.json(
+          { error: { message: "context length exceeded", type: "invalid_request_error", code: "context_length_exceeded" } },
+          { status: 400 },
+        );
+      }
+      return Response.json({ id: "resp", object: "response", status: "completed", output: [] });
     };
 
     const response = await handleResponsesWithPolicyFallback(request(), {} as OcxConfig, logCtx, {}, { runCore });
 
-    expect(response.status).toBe(400);
-    expect(seenModels).toEqual(["policy/daily"]);
+    expect(response.status).toBe(200);
+    expect(seenModels).toEqual(["policy/daily", "provider-b/model-b"]);
   });
   test("retries the next policy candidate and keeps distinct physical attempts", async () => {
     const trace = policyTrace();
     const logCtx = { requestedModel: "policy/daily", routeDecision: trace, attempts: [] } as unknown as RequestLogContext;
     const seenModels: string[] = [];
+    const seenAuthorization: Array<string | null> = [];
+    const seenAccountIds: Array<string | null> = [];
     const seenTerminalCodes: Array<string | undefined> = [];
     let bodyAcceptedCount = 0;
 
-    const response = await handleResponsesWithPolicyFallback(request(), {} as OcxConfig, logCtx, {
+    const initialRequest = request();
+    const initialHeaders = new Headers(initialRequest.headers);
+    initialHeaders.set("authorization", "Bearer fixture");
+    initialHeaders.set("chatgpt-account-id", "caller-account");
+    const credentialedRequest = new Request(initialRequest, { headers: initialHeaders });
+
+    const response = await handleResponsesWithPolicyFallback(credentialedRequest, {} as OcxConfig, logCtx, {
       onRequestBodyRead: () => {
         bodyAcceptedCount += 1;
       },
     }, {
       runCore: async (req, _config, childLog, options) => {
         options.onRequestBodyRead?.();
+        seenAuthorization.push(req.headers.get("authorization"));
+        seenAccountIds.push(req.headers.get("chatgpt-account-id"));
         const body = await req.json() as { model: string };
         seenModels.push(body.model);
         seenTerminalCodes.push(childLog.terminalErrorCode);
@@ -170,6 +215,8 @@ describe("policy candidate fallback", () => {
     expect(response.status).toBe(200);
     expect(bodyAcceptedCount).toBe(1);
     expect(seenModels).toEqual(["policy/daily", "provider-b/model-b"]);
+    expect(seenAuthorization).toEqual(["Bearer fixture", null]);
+    expect(seenAccountIds).toEqual(["caller-account", null]);
     expect(seenTerminalCodes).toEqual([undefined, undefined]);
     expect(logCtx.requestedModel).toBe("policy/daily");
     expect(logCtx.routeDecision).toBe(trace);

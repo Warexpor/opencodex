@@ -1,3 +1,4 @@
+import { getAccountQuotaHistory } from "../../src/codex/quota";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import { sessionLaneIdFromRequest } from "../../src/server/request-log-conversation";
 /**
@@ -12,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
 import { OPAQUE_COMPACTION_NOTE, SUMMARY_PREFIX } from "../../src/responses/compaction";
+import { externalTaskInputContent } from "../../src/responses/task-input";
 import { looksLikeBackendCiphertext } from "../../src/server/responses/encrypted-payload";
 import * as adapterResolveModule from "../../src/server/adapter-resolve";
 import * as visionModule from "../../src/vision";
@@ -410,7 +412,7 @@ describe("native compact usage reporting", () => {
 });
 
 describe("native Codex pool compaction", () => {
-  test("keeps a Spark reset cooldown separate from a Terra compact request (#590)", async () => {
+  test("ignores a retired Spark reset without cooling later compact requests", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "ocx-compact-scope-"));
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
@@ -458,7 +460,7 @@ describe("native Codex pool compaction", () => {
         config,
         { model: "", provider: "" },
       );
-      expect(cooledSpark.status).toBe(429);
+      expect(cooledSpark.status).toBe(200);
 
       const terra = await handleResponsesCompact(
         compactionRequest(baseCompactionBody({ model: "gpt-5.6-terra" })),
@@ -477,7 +479,7 @@ describe("native Codex pool compaction", () => {
     }
   });
 
-  test("a cancelled Spark recovery probe releases its compact lease (#590)", async () => {
+  test("a cancelled shared recovery probe releases its compact lease (#590)", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "ocx-compact-probe-"));
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
@@ -504,7 +506,7 @@ describe("native Codex pool compaction", () => {
       recordCodexUpstreamOutcome(config, "pool-a", 429, {
         now,
         resetAt: Math.floor((now + 4 * 24 * 60 * 60_000) / 1_000),
-        modelId: "gpt-5.3-codex-spark",
+        modelId: "gpt-5.6-sol",
       });
       Date.now = () => probeAt;
       globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
@@ -516,7 +518,7 @@ describe("native Codex pool compaction", () => {
         },
       }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
       const pending = handleResponsesCompact(
-        compactionRequest(baseCompactionBody({ model: "gpt-5.3-codex-spark" }), abort.signal),
+        compactionRequest(baseCompactionBody({ model: "gpt-5.6-sol" }), abort.signal),
         config,
         { model: "", provider: "" },
       );
@@ -531,9 +533,9 @@ describe("native Codex pool compaction", () => {
         new Headers({ authorization: "Bearer main-token" }),
         config,
         "pool",
-        { modelId: "gpt-5.3-codex-spark" },
+        { modelId: "gpt-5.6-sol" },
       );
-      expect(nextProbe).toMatchObject({ probeQuotaScope: "spark" });
+      expect(nextProbe).toMatchObject({ probeQuotaScope: "shared" });
       releaseCodexAuthContextProbeLease(nextProbe);
     } finally {
       Date.now = originalNow;
@@ -547,7 +549,7 @@ describe("native Codex pool compaction", () => {
     }
   });
 
-  test("a Spark recovery probe releases its compact lease when connect is cancelled (#590)", async () => {
+  test("a shared recovery probe releases its compact lease when connect is cancelled (#590)", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "ocx-compact-connect-probe-"));
     const previousOpencodexHome = process.env.OPENCODEX_HOME;
     const previousCodexHome = process.env.CODEX_HOME;
@@ -572,7 +574,7 @@ describe("native Codex pool compaction", () => {
       recordCodexUpstreamOutcome(config, "pool-a", 429, {
         now,
         resetAt: Math.floor((now + 4 * 24 * 60 * 60_000) / 1_000),
-        modelId: "gpt-5.3-codex-spark",
+        modelId: "gpt-5.6-sol",
       });
       Date.now = () => probeAt;
       globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
@@ -582,7 +584,7 @@ describe("native Codex pool compaction", () => {
         markFetchStarted();
       })) as typeof fetch;
       const pending = handleResponsesCompact(
-        compactionRequest(baseCompactionBody({ model: "gpt-5.3-codex-spark" }), abort.signal),
+        compactionRequest(baseCompactionBody({ model: "gpt-5.6-sol" }), abort.signal),
         config,
         { model: "", provider: "" },
       );
@@ -596,9 +598,9 @@ describe("native Codex pool compaction", () => {
         new Headers({ authorization: "Bearer main-token" }),
         config,
         "pool",
-        { modelId: "gpt-5.3-codex-spark" },
+        { modelId: "gpt-5.6-sol" },
       );
-      expect(nextProbe).toMatchObject({ probeQuotaScope: "spark" });
+      expect(nextProbe).toMatchObject({ probeQuotaScope: "shared" });
       releaseCodexAuthContextProbeLease(nextProbe);
     } finally {
       Date.now = originalNow;
@@ -1228,6 +1230,43 @@ describe("compact alternate-account attempt (#913)", () => {
     });
   });
 
+  test("ordinary pooled HTTP responses publish their captured quota history writer", async () => {
+    await withPoolEnv("ocx-http-history-", async config => {
+      globalThis.fetch = (async () => Response.json(completedPayload("ordinary history"), {
+        headers: { "x-codex-primary-used-percent": "31", "x-codex-primary-window-minutes": "10080" },
+      })) as typeof fetch;
+      const response = await handleResponses(compactionRequest({ model: "gpt-5.5", input: [{ role: "user", content: "hello" }], stream: false }), config, { model: "", provider: "" });
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(getAccountQuotaHistory("pool-a").observations).toHaveLength(1);
+      expect(getAccountQuotaHistory("pool-a").observations[0].windows[0].usedPercent).toBe(31);
+    });
+  });
+
+  test.each([false, true])("compact final quota history follows the serving account with alternate=%s", async alternate => {
+    await withPoolEnv("ocx-compact-history-", async config => {
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls++;
+        const rejected = alternate && calls === 1;
+        return Response.json(rejected ? { error: { message: "pool exhausted" } } : completedPayload("history compact"), {
+          status: rejected ? 429 : 200,
+          headers: { "x-codex-primary-used-percent": rejected ? "100" : "25", "x-codex-primary-window-minutes": "10080" },
+        });
+      }) as typeof fetch;
+      const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({})), config, { model: "", provider: "" });
+      expect(response.status).toBe(200);
+      await response.text();
+      const first = getAccountQuotaHistory("pool-a").observations;
+      expect(first).toHaveLength(1);
+      expect(first[0].windows[0].usedPercent).toBe(alternate ? 100 : 25);
+      const second = getAccountQuotaHistory("pool-b").observations;
+      expect(second).toHaveLength(alternate ? 1 : 0);
+      if (alternate) expect(second[0].windows[0].usedPercent).toBe(25);
+      expect(calls).toBe(alternate ? 2 : 1);
+    });
+  });
+
   test("canonical trailing slashes are pinned before native compact sends pool credentials", async () => {
     await withPoolEnv("ocx-compact-canonical-url-", async config => {
       config.providers.openai!.baseUrl = "https://chatgpt.com/backend-api/codex///";
@@ -1442,6 +1481,9 @@ describe("compact alternate-account attempt (#913)", () => {
         models: ["gpt-5.6-sol"],
       };
       const headers = { "x-codex-parent-thread-id": "compact-routed-handoff-thread" };
+      // The remembered route is keyed by the admitted principal, so every call in
+      // this scenario authenticates as the same configured client.
+      const admission = { kind: "configured", keyId: "compact-client", source: "dedicated", contextPrincipalId: "compact-client-principal" } as const;
       const calls: Array<{ model: string; nativeCompact: boolean }> = [];
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = typeof input === "string"
@@ -1466,8 +1508,7 @@ describe("compact alternate-account attempt (#913)", () => {
           undefined,
           headers,
         ),
-        config,
-        { model: "", provider: "" },
+        config, { model: "", provider: "" }, undefined, admission,
       );
       expect(manual.status).toBe(200);
       expect(calls).toEqual([{ model: "deepseek-v4-flash", nativeCompact: false }]);
@@ -1479,8 +1520,7 @@ describe("compact alternate-account attempt (#913)", () => {
           undefined,
           { "x-codex-parent-thread-id": "different-compact-thread" },
         ),
-        config,
-        { model: "", provider: "" },
+        config, { model: "", provider: "" }, undefined, admission,
       );
       expect(unrelated.status).toBe(502);
       expect(calls.length).toBeGreaterThan(0);
@@ -1494,8 +1534,7 @@ describe("compact alternate-account attempt (#913)", () => {
           undefined,
           headers,
         ),
-        config,
-        logCtx,
+        config, logCtx, undefined, admission,
       );
 
       expect(automatic.status).toBe(200);
@@ -2243,7 +2282,10 @@ describe("computer screenshot output translation boundary", () => {
   test("rejects before an otherwise active vision description", async () => {
     const config = keyProviderConfig({ adapter: "openai-chat", noVisionModels: ["model"] });
     config.visionSidecar = { enabled: true, backend: "routed", model: "vision/seeing" };
-    config.providers.vision = { adapter: "openai-chat", baseUrl: "https://vision.example/v1", apiKey: "test-key" };
+    config.providers.vision = {
+      adapter: "openai-chat", baseUrl: "https://vision.example/v1", apiKey: "test-key",
+      modelInputModalities: { seeing: ["text", "image"] },
+    };
     // Routed vision needs no live OpenAI account for this controlled description dependency.
     const resolveAuth = spyOn(visionModule, "shouldResolveOpenAiVisionSidecar").mockReturnValue(false);
     const describe = spyOn(visionModule, "describeImagesInPlace").mockImplementation(async () => {});
@@ -2391,9 +2433,27 @@ describe("external task-input envelopes (#3735)", () => {
     expect(captured[0]!.messages).toEqual([{ role: "user", content: "plaintext task" }]);
   });
 
+  test("an empty or null call_id is task input, not a rejection (#3807 supersedes)", async () => {
+    // These two shapes were in the invalid list above until #3807 showed they are the same
+    // seed as the absent-field form: neither value can pair with a `function_call`, and a
+    // Codex desktop sub-agent seed emitted with an explicit `call_id: null` was answered
+    // 400 for a turn that is really external task input. A wrong-TYPED key stays rejected.
+    const captured: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      captured.push(JSON.parse(String(init?.body)));
+      return jsonResponse({ id: "chat_seed", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    }) as typeof fetch;
+    for (const callId of [null, ""]) {
+      captured.length = 0;
+      const res = await handleResponses(compactionRequest(body({ ...external("seeded task"), call_id: callId })),
+        keyProviderConfig({ adapter: "openai-chat" }), { model: "", provider: "" });
+      expect(res.status).toBe(200);
+      await res.text();
+      expect(captured[0]!.messages).toEqual([{ role: "user", content: "seeded task" }]);
+    }
+  });
+
   const invalid: Array<[string, Record<string, unknown>]> = [
-    ["empty call id", { ...external(), call_id: "" }],
-    ["null call id", { ...external(), call_id: null }],
     ["numeric call id", { ...external(), call_id: 42 }],
     ["incomplete metadata", { ...external(), namespace: "" }],
     ["custom output", { ...external(), type: "custom_tool_call_output" }],
@@ -2666,5 +2726,51 @@ describe("unpaired tool result boundary (#3259)", () => {
     expect(bodies.length).toBe(1);
     expect(bodies[0]).toContain("[tool output for unknown call]");
     expect(bodies[0]).not.toContain("undefined");
+  });
+});
+
+describe("unusable-call_id task-input seed (#3807)", () => {
+  const seed = (extra: Record<string, unknown>) => ({
+    type: "function_call_output", id: "fc_seed", name: "create_thread", namespace: "codex",
+    output: "<codex_delegation>continue</codex_delegation>", ...extra,
+  });
+
+  test("a seed carrying call_id: null is admitted as task input", () => {
+    // `null` is not a pairing key, so the item is the same external seed the absent-field
+    // form already carries. Rejecting it produced the reported 400 on clients that emit
+    // the field explicitly.
+    expect(externalTaskInputContent(seed({ call_id: null }))).toBe("<codex_delegation>continue</codex_delegation>");
+  });
+
+  test("a seed carrying an empty-string call_id is admitted identically", () => {
+    expect(externalTaskInputContent(seed({ call_id: "" }))).toBe("<codex_delegation>continue</codex_delegation>");
+    expect(externalTaskInputContent(seed({ call_id: "   " }))).toBe("<codex_delegation>continue</codex_delegation>");
+  });
+
+  test("the absent-field form still works (no regression on a73bb160f)", () => {
+    expect(externalTaskInputContent(seed({}))).toBe("<codex_delegation>continue</codex_delegation>");
+  });
+
+  test("a REAL call_id is still a paired tool result, never task input", () => {
+    // The pairing key is what separates a tool result from a seed. Admitting a paired
+    // result as user text would silently drop a real tool round-trip.
+    expect(externalTaskInputContent(seed({ call_id: "call_1" }))).toBeUndefined();
+  });
+
+  test("a non-string, non-null call_id stays rejected", () => {
+    // A numeric id is malformed input, not the absent-pairing seed shape; it keeps the
+    // #3259 rejection so a wrong-typed key cannot reach a translating adapter.
+    expect(externalTaskInputContent(seed({ call_id: 42 }))).toBeUndefined();
+    expect(externalTaskInputContent(seed({ call_id: {} }))).toBeUndefined();
+  });
+
+  test("every other #3735 validation still holds with an unusable call_id", () => {
+    // The relaxation is ONLY about the pairing key. Envelope completeness, blank output,
+    // and opaque ciphertext keep their existing rejections.
+    expect(externalTaskInputContent({ type: "function_call_output", call_id: null, output: "x" })).toBeUndefined();
+    expect(externalTaskInputContent(seed({ call_id: null, namespace: "" }))).toBeUndefined();
+    expect(externalTaskInputContent(seed({ call_id: null, output: "   " }))).toBeUndefined();
+    expect(externalTaskInputContent(seed({ call_id: null, output: [] }))).toBeUndefined();
+    expect(externalTaskInputContent(seed({ call_id: null, output: [{ type: "input_image", image_url: 42 }] }))).toBeUndefined();
   });
 });

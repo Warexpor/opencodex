@@ -86,11 +86,35 @@ export function outboundProxyConfigured(
   return OUTBOUND_PROXY_ENV_KEYS.some(key => proxyEnvPresent(key, env));
 }
 
+/**
+ * The proxy URL selected by configured outbound fetch for `url`, or null when none applies.
+ *
+ * Bun selects by scheme: `HTTPS_PROXY` for `https:` targets, `HTTP_PROXY` for `http:`.
+ * A SOCKS5 `ALL_PROXY` is selected by the explicit wrapper first; other ALL_PROXY
+ * schemes remain excluded because the native HTTP fetch does not honor them.
+ * Presence of *some* proxy variable (`outboundProxyConfigured`) is not that guarantee.
+ */
+export function effectiveProxyFor(
+  url: URL,
+  env: ProxyEnvMap = process.env,
+): string | null {
+  const key: ProxyEnvKey | null = url.protocol === "https:"
+    ? "HTTPS_PROXY"
+    : url.protocol === "http:"
+      ? "HTTP_PROXY"
+      : null;
+  if (!key) return null;
+  // The installed SOCKS wrapper takes this route before Bun sees scheme proxies.
+  const socksProxy = socks5ProxyFromEnv(env);
+  if (socksProxy) return socksProxy;
+  const value = env[key]?.trim() || env[key.toLowerCase()]?.trim();
+  return value ? value : null;
+}
+
 export function isSocks5ProxyUrl(proxy: string): boolean {
   return /^socks5h?:\/\//i.test(proxy.trim());
 }
 
-/** Only ALL_PROXY / all_proxy; first value that is socks5(h). */
 export function socks5ProxyFromEnv(env: ProxyEnvMap = process.env): string | undefined {
   const candidates = [env.ALL_PROXY, env.all_proxy];
   return candidates.find(value => typeof value === "string" && isSocks5ProxyUrl(value));
@@ -102,14 +126,17 @@ export function configuredOutboundFetch(
   fallback?: typeof globalThis.fetch,
 ): Promise<Response> {
   const base = fallback ?? (globalThis.fetch === installedFetch ? nativeFetch : globalThis.fetch);
-  const proxy = socks5ProxyFromEnv();
+  const explicitProxy = (init as (RequestInit & { proxy?: string }) | undefined)?.proxy;
+  const proxy = typeof explicitProxy === "string"
+    ? (isSocks5ProxyUrl(explicitProxy) ? explicitProxy : undefined)
+    : socks5ProxyFromEnv();
   let url: URL;
   try {
     url = new URL(input instanceof Request ? input.url : String(input));
   } catch {
     return base!(input, init);
   }
-  if (proxy && (url.protocol === "http:" || url.protocol === "https:") && !noProxyMatches(url)) {
+  if (proxy && (url.protocol === "http:" || url.protocol === "https:") && (explicitProxy !== undefined || !noProxyMatches(url))) {
     return socks5Fetch(input, init, proxy);
   }
   return base!(input, init);
@@ -122,7 +149,6 @@ type FetchWithPreconnect = typeof globalThis.fetch & {
 let nativeFetch: FetchWithPreconnect | undefined;
 let installedFetch: FetchWithPreconnect | undefined;
 
-/** Install/uninstall globalThis.fetch wrapper when ALL_PROXY is socks5. Preserves .preconnect. */
 export function configureSocks5Fetch(): void {
   if (globalThis.fetch !== installedFetch) {
     nativeFetch = globalThis.fetch as FetchWithPreconnect;
@@ -145,26 +171,4 @@ export function configureSocks5Fetch(): void {
   ) as FetchWithPreconnect;
   installedFetch = wrapped;
   globalThis.fetch = wrapped;
-}
-
-/**
- * The proxy URL that Bun's fetch will actually use for `url`, or null when none applies.
- *
- * Bun selects by scheme: `HTTPS_PROXY` for `https:` targets, `HTTP_PROXY` for `http:`.
- * `ALL_PROXY` is deliberately not consulted here — fetch does not honour it, so a caller
- * that needs "this request will ride the proxy" as a precondition must not count it.
- * Presence of *some* proxy variable (`outboundProxyConfigured`) is not that guarantee.
- */
-export function effectiveProxyFor(
-  url: URL,
-  env: ProxyEnvMap = process.env,
-): string | null {
-  const key: ProxyEnvKey | null = url.protocol === "https:"
-    ? "HTTPS_PROXY"
-    : url.protocol === "http:"
-      ? "HTTP_PROXY"
-      : null;
-  if (!key) return null;
-  const value = env[key]?.trim() || env[key.toLowerCase()]?.trim();
-  return value ? value : null;
 }
