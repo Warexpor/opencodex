@@ -231,6 +231,30 @@ test.each([
   expect(createGrokResponsesTimestampBlockRewrite()(block)).toEqual([block]);
 });
 
+test("Grok fills a missing response created_at with the current unix second", () => {
+  const rewrite = createGrokResponsesTimestampBlockRewrite(() => 1_789_740_485_000);
+  const block = 'data: {"type":"response.completed","response":{"id":"resp_missing","status":"completed","output":[]}}';
+  expect(rewrite(block)).toEqual([
+    'data: {"type":"response.completed","response":{"id":"resp_missing","status":"completed","output":[],"created_at":1789740485}}',
+  ]);
+});
+
+test("Grok fills created_at on an empty response object", () => {
+  const rewrite = createGrokResponsesTimestampBlockRewrite(() => 1_789_740_485_000);
+  const block = 'data: {"type":"response.created","response":{}}';
+  expect(rewrite(block)).toEqual([
+    'data: {"type":"response.created","response":{"created_at":1789740485}}',
+  ]);
+});
+
+test("Grok keeps a present created_at and still normalizes a float completed_at", () => {
+  const rewrite = createGrokResponsesTimestampBlockRewrite(() => 1_700_000_000_000);
+  const block = 'data: {"type":"response.completed","response":{"created_at":1789740485,"completed_at":1789740486.0}}';
+  expect(rewrite(block)).toEqual([
+    'data: {"type":"response.completed","response":{"created_at":1789740485,"completed_at":1789740486}}',
+  ]);
+});
+
 test("Grok receives an integer completed_at timestamp", () => {
   const block = 'data: {"type":"response.completed","response":{"created_at":1789740485,"completed_at":1789740486.0}}';
   expect(createGrokResponsesTimestampBlockRewrite()(block)).toEqual([
@@ -503,6 +527,9 @@ describe("responsesSnapshotRepair through /v1/responses", () => {
       expect(grokText).not.toContain("codex.response.metadata");
       expect(grokText).toContain('"type":"response.completed"');
       expect(grokText).toContain('"created_at":1789740485}');
+      const grokCompleted = grokText.split("\n").find(line => line.includes('"id":"resp_control"') && line.includes('"response.completed"'));
+      const grokCompletedBody = JSON.parse(grokCompleted!.replace(/^data: /, "")) as { response: { created_at?: number } };
+      expect(Number.isSafeInteger(grokCompletedBody.response.created_at)).toBe(true);
 
       const ordinaryResponse = await request(false);
       expect(ordinaryResponse.status).toBe(200);
@@ -510,6 +537,9 @@ describe("responsesSnapshotRepair through /v1/responses", () => {
       expect(ordinaryText).toContain("codex.rate_limits");
       expect(ordinaryText).toContain("codex.response.metadata");
       expect(ordinaryText).toContain('"created_at":1789740485.0}');
+      const ordinaryCompleted = ordinaryText.split("\n").find(line => line.includes('"id":"resp_control"') && line.includes('"response.completed"'));
+      const ordinaryCompletedBody = JSON.parse(ordinaryCompleted!.replace(/^data: /, "")) as { response: { created_at?: number } };
+      expect(ordinaryCompletedBody.response.created_at).toBeUndefined();
     } finally {
       await server.stop(true);
     }

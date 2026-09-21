@@ -169,8 +169,76 @@ export function createGrokResponsesControlFrameBlockRewrite(): SseBlockRewrite {
   };
 }
 
+function responseHasOwnField(payload: string, field: string): boolean | null {
+  const responseRange = findResponseObjectRange(payload);
+  if (responseRange === null) return null;
+  let cursor = responseRange.start + 1;
+  while (cursor < responseRange.end) {
+    cursor = skipJsonWhitespace(payload, cursor);
+    if (payload[cursor] === "}") return false;
+    if (payload[cursor] !== '"') return null;
+    const keyEnd = findJsonStringEnd(payload, cursor);
+    if (keyEnd === undefined) return null;
+    let key: unknown;
+    try {
+      key = JSON.parse(payload.slice(cursor, keyEnd));
+    } catch {
+      return null;
+    }
+    cursor = skipJsonWhitespace(payload, keyEnd);
+    if (payload[cursor] !== ":") return null;
+    const valueStart = skipJsonWhitespace(payload, cursor + 1);
+    const valueEnd = findJsonValueEnd(payload, valueStart);
+    if (valueEnd === undefined || valueEnd > responseRange.end) return null;
+    if (key === field) return true;
+    cursor = skipJsonWhitespace(payload, valueEnd);
+    if (payload[cursor] === "}") return false;
+    if (payload[cursor] !== ",") return null;
+    cursor += 1;
+  }
+  return null;
+}
+
+/**
+ * Splice a missing `response.created_at` into the raw payload. Re-stringifying the
+ * event would respell unrelated numbers, which the integer-timestamp rewrite refuses.
+ */
+function insertMissingResponseCreatedAt(
+  payload: string,
+  createdAt: number,
+  event: Record<string, unknown>,
+): string | null {
+  const responseRange = findResponseObjectRange(payload);
+  if (responseRange === null || responseHasOwnField(payload, "created_at") !== false) return null;
+  const closing = responseRange.end - 1;
+  if (payload[closing] !== "}") return null;
+  let interiorBlank = true;
+  for (let index = responseRange.start + 1; index < closing; index += 1) {
+    if (!/[\t\n\r ]/.test(payload[index] ?? "")) {
+      interiorBlank = false;
+      break;
+    }
+  }
+  const response = event.response;
+  if (!response || typeof response !== "object" || Array.isArray(response)) return null;
+  const rewritten = `${payload.slice(0, closing)}${interiorBlank ? "" : ","}"created_at":${createdAt}${payload.slice(closing)}`;
+  (response as Record<string, unknown>).created_at = createdAt;
+  try {
+    if (JSON.stringify(JSON.parse(rewritten)) !== JSON.stringify(event)) {
+      delete (response as Record<string, unknown>).created_at;
+      return null;
+    }
+  } catch {
+    delete (response as Record<string, unknown>).created_at;
+    return null;
+  }
+  return rewritten;
+}
+
 /** Normalize safe integer response timestamps for Grok's strict Responses decoder. */
-export function createGrokResponsesTimestampBlockRewrite(): SseBlockRewrite {
+export function createGrokResponsesTimestampBlockRewrite(
+  nowMs: () => number = Date.now,
+): SseBlockRewrite {
   return (block) => {
     const payload = sseDataPayload(block);
     if (payload === null || payload === "[DONE]") return [block];
@@ -189,6 +257,13 @@ export function createGrokResponsesTimestampBlockRewrite(): SseBlockRewrite {
     }
     const response = eventRecord.response as Record<string, unknown>;
     let rewrittenPayload = payload;
+    if (!Object.hasOwn(response, "created_at")) {
+      const createdAt = Math.floor(nowMs() / 1000);
+      if (createdAt < 0 || !Number.isSafeInteger(createdAt)) return [block];
+      const inserted = insertMissingResponseCreatedAt(rewrittenPayload, createdAt, eventRecord);
+      if (inserted === null) return [block];
+      rewrittenPayload = inserted;
+    }
     for (const field of GROK_RESPONSE_INTEGER_TIMESTAMP_FIELDS) {
       const value = response[field];
       if (value === undefined) continue;

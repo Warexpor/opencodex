@@ -178,7 +178,8 @@ function backfillOutputItem(item: unknown, slot: ItemIdSlot, inferredStatus: str
  * combo backup response is returned byte-exact. Injecting a field the upstream
  * never sent breaks that contract. Both cannot hold for the same body, so the
  * `created_at` half needs its own decision about which contract yields; it is
- * not a detail to slip in beside `status`.
+ * not a detail to slip in beside `status`. Marked Grok streams fill a missing
+ * `response.created_at` in `grok-responses-control-frame.ts` instead.
  *
  * Returns the same object reference if nothing changed.
  */

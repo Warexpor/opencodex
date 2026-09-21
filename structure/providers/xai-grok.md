@@ -84,8 +84,10 @@ malformed, gapped, oversized, contradictory, failed, or incomplete streams stay 
 
 The same marked client-facing chain normalizes lexical floating-point `response.created_at` and
 `response.completed_at` values to their JSON integer spelling only for `response.*` events whose
-nested values are nonnegative safe integers. Missing, malformed, fractional, negative, unsafe, and
-byte-identical payloads pass through unchanged.
+nested values are nonnegative safe integers. A missing `response.created_at` on those events is
+filled with the current Unix time in seconds. Malformed, fractional, negative, unsafe, and
+byte-identical payloads pass through unchanged, as does a missing `completed_at`. Unmarked callers
+do not receive either rewrite.
 
 > Decision record: [ADR-0059](../decisions/ADR-0059-xai-grok-hardening-official-grok-build-contract.md)
 

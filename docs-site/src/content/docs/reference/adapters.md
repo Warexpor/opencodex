@@ -519,6 +519,12 @@ items whose raw fields satisfy the supported shapes. Deltas alone do not create
 output. Malformed, contradictory, duplicated, gapped or oversized evidence keeps
 the empty terminal unchanged; failed and incomplete responses never become success.
 
+The same marked stream fills a missing `response.created_at` with the current
+Unix time in seconds. Grok Build's decoder rejects a terminal Response that
+omits that field. A timestamp that is already present is left in place, aside
+from rewriting a whole-number float to an integer. Unmarked clients do not
+receive this fill.
+
 The marker is a client-selected compatibility option, not authenticated identity
 or a permission grant. Unmarked clients retain their existing behavior. This
 repair runs before the separate provider `responsesSnapshotRepair` option and
