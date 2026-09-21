@@ -266,10 +266,7 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
         }
         if (parsed.stream) body.stream_options = { include_usage: true };
 
-        const outbound = isOpenCodeZenProvider(provider)
-          ? applyOpenCodeZenFreeTierBody(body, "chat", parsed.modelId)
-          : body;
-        const bodyJson = JSON.stringify(outbound);
+        const bodyJson = JSON.stringify(isOpenCodeZenProvider(provider) ? applyOpenCodeZenFreeTierBody(body, "chat", parsed.modelId) : body);
         const actualServiceTier = typeof body.service_tier === "string" ? body.service_tier : null;
         const tierLog = createAdapterTierMetadata(
           parsed.options.tierObservation,
@@ -301,7 +298,11 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
         };
       };
       if (hasShrinkableOpenAIChatImages(messages)) {
-        return normalizeOpenAIChatImages(messages, { tierBias: incoming?.imageTierBias }).then(finish, finish);
+        const imageOptions = { tierBias: incoming?.imageTierBias, abortSignal: incoming?.abortSignal };
+        return normalizeOpenAIChatImages(messages, imageOptions).then(finish, error => {
+          if (incoming?.abortSignal?.aborted) throw error;
+          return finish();
+        });
       }
       return finish();
     },

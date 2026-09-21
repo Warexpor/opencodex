@@ -2,7 +2,15 @@ import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxP
 import { catalogModelSupportsReasoningSummaries } from "../../codex/catalog";
 import { OCX_REASONING_PREFIX } from "../../responses/reasoning-envelope";
 import { configuredReasoningEfforts, mapReasoningEffort, modelRecordValue } from "../../reasoning-effort";
+import { isOpenCodeZenProvider } from "../../providers/opencode-zen-transport";
 import { isPlainObject } from "./internal";
+
+/** Drop only replayed Responses reasoning items; all other continuation input stays untouched. */
+export function dropResponsesReasoningInputItems(body: unknown): unknown {
+  if (!isPlainObject(body) || !Array.isArray(body.input)) return body;
+  const input = body.input.filter(item => !isPlainObject(item) || item.type !== "reasoning");
+  return input.length === body.input.length ? body : { ...body, input };
+}
 
 /**
  * Sanitize reasoning input by field policy, not by preserving each item's shape. Retaining a
@@ -229,6 +237,10 @@ export function applyDefaultResponsesReasoningEffort(
   provider: OcxProviderConfig,
   modelId: string,
 ): unknown {
+  // Registry defaults are catalog metadata. Only Zen's Muse free tier needs the
+  // omitted effort filled in; other providers (BigModel Turbo among them) must
+  // keep an absent effort absent.
+  if (!isOpenCodeZenProvider(provider)) return body;
   if (!isPlainObject(body)) return body;
   const def = modelRecordValue(provider.modelDefaultReasoningEfforts, modelId);
   if (typeof def !== "string" || !def) return body;

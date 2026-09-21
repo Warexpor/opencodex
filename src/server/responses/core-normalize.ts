@@ -13,7 +13,6 @@ import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/main-account";
 import type { RequestLogContext } from "../request-log";
 import type { HandleResponsesOptions } from "./core-options";
 import { prepareEffortNormalization } from "../effort-policy";
-import { providerModelResponsesUpstreamStreaming } from "../../providers/registry";
 import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
 import { resolveOpenCodeZenTransport } from "../../providers/opencode-zen-transport";
 import { getOrAllocateRequestSessionLane } from "../request-log-conversation";
@@ -81,6 +80,7 @@ export function canPassThroughEncryptedV2AgentTask(
     route.modelId,
     provider,
     inboundWire,
+    route.staticPolicy,
   ).adapter === "openai-responses";
 }
 
@@ -127,6 +127,8 @@ export async function applyFinalRouteRequestNormalization(args: {
   const responseModelId = parsed.modelId;
   const preserveAnthropicResponseModel = route.providerName === "anthropic"
     || route.provider.adapter === "anthropic";
+  const finalSelectedModelId = route.modelId;
+  const virtualModel = applyOpenAiVirtualModel(parsed, route, logCtx, inboundWire);
 
   // Apply the routed model id upstream: routing may strip a "<provider>/" namespace.
   if (route.modelId !== parsed.modelId) {
@@ -137,11 +139,7 @@ export async function applyFinalRouteRequestNormalization(args: {
   }
   // Transport-neutral reliability policy (#875): applies to any Responses
   // upstream whose final adapter is openai-responses, not only WS turns.
-  const responsesUpstreamStreaming = providerModelResponsesUpstreamStreaming(
-    route.providerName,
-    route.provider,
-    route.modelId,
-  );
+  const responsesUpstreamStreaming = route.staticPolicy.model.responsesUpstreamStreaming;
 
   // Preserve the routed destination for Go recognition, then settle the wire before
   // deriving protocol-scoped affinity. Recognition must not inspect the flipped adapter.
@@ -151,6 +149,7 @@ export async function applyFinalRouteRequestNormalization(args: {
     route.modelId,
     routedProvider,
     inboundWire,
+    route.staticPolicy,
   );
   route.provider = resolveOpenCodeZenTransport(resolveOpenCodeGoTransport(wireProvider,
     args.claudeGoAffinity ? args.claudeGoAffinity.sessionLane : getOrAllocateRequestSessionLane(req),
@@ -169,7 +168,7 @@ export async function applyFinalRouteRequestNormalization(args: {
       || (!summary && route.provider.showThinkingSummary !== true);
   }
   if (preserveAnthropicResponseModel) parsed._responseModelId = responseModelId;
-  logCtx.model = route.modelId;
+  logCtx.model = virtualModel?.selectedModelId ?? route.modelId;
   logCtx.provider = route.providerName;
   logCtx.providerAdapter = route.provider.adapter;
   logCtx.routeDecision = route.routeDecision;
@@ -195,11 +194,6 @@ export async function applyFinalRouteRequestNormalization(args: {
     (parsed._rawBody as Record<string, unknown>).store = false;
   }
 
-  // Final selected model before virtual wire-model rewriting (Pro aliases).
-  const finalSelectedModelId = route.modelId;
-
-  // Virtual model rewriting: Pro aliases → base model + reasoning.mode="pro".
-  applyOpenAiVirtualModel(parsed, route, logCtx);
   if (parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId) {
     logCtx.resolvedModel = route.modelId;
     logCtx.preserveResolvedModelFromRoute = true;
