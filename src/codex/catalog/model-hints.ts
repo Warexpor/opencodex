@@ -35,7 +35,7 @@ import { modelInList } from "../../types";
 import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
 import { isModelVisionSidecarConsumer } from "../../vision/eligibility";
 import { getModelMetadata, getModelMetadataCaseInsensitive, listModelMetadata, resolveMetadataProvider, type ModelMetadata } from "../../generated/model-metadata";
-import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../../providers/derive";
+import { azureVendorModelMetadata, enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../../providers/derive";
 import {
   captureFastPolicyAuthority,
   fastPolicyForModel,
@@ -45,6 +45,7 @@ import type { FastPolicyAuthority } from "../../providers/fastwire";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../../providers/registry";
 import { parseAntigravityAvailableModels, registerAntigravityDiscoveredWireModels } from "../../providers/antigravity-models";
 import { applyProviderContextCap, providerContextCap, resolveUnknownRoutedContextWindow } from "../../providers/context-cap";
+import { githubCopilotCatalogContextWindow } from "../../providers/github-copilot-context";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { effectiveModelAliases } from "../../providers/default-aliases";
 import { routedSlug, slugEquals, slugEquivalenceKey, slugsEquivalent } from "../../providers/slug-codec";
@@ -216,9 +217,11 @@ export function routedMaxOutputTokens(
   model: CatalogModel,
   metadataId = model.id,
   metadataModelIdCaseFold?: boolean,
+  metadataConfigDir?: string,
 ): number | undefined {
   const discovered = positiveSafeInteger(model.maxOutputTokens);
-  const generated = generatedMaxOutputTokens(providerName, model.id, metadataId, metadataModelIdCaseFold);
+  const generated = positiveSafeInteger(azureVendorModelMetadata(provider.baseUrl, metadataId, metadataConfigDir)?.maxTokens)
+    ?? generatedMaxOutputTokens(providerName, model.id, metadataId, metadataModelIdCaseFold);
   const configured = positiveSafeInteger(
     modelRecordValue(provider.modelMaxOutputTokens, model.id),
   );
@@ -254,6 +257,7 @@ export function applyProviderConfigHints(
   providerCap?: number,
   metadataModelIdCaseFold?: boolean,
   effectiveAlias?: string | null,
+  metadataConfigDir?: string,
 ): CatalogModel {
   const staticPolicy = resolveModelPolicy({
     providerName: name,
@@ -275,13 +279,14 @@ export function applyProviderConfigHints(
     : model.providerAlias;
   const configuredCap = staticPolicy.model.contextWindow ?? configuredContextWindow(prov, model.id);
   const configuredMaxInput = staticPolicy.model.maxInputTokens;
-  const maxOutputTokens = routedMaxOutputTokens(name, prov, model, model.id, metadataModelIdCaseFold);
+  const azureMetadata = azureVendorModelMetadata(prov.baseUrl, model.id, metadataConfigDir);
+  const maxOutputTokens = routedMaxOutputTokens(name, prov, model, model.id, metadataModelIdCaseFold, metadataConfigDir);
   const configuredAutoCompact = configuredAutoCompactTokenLimit(prov, model.id);
   // The resolver owns exact capability precedence and legacy exact/colon-family/case-fold fallback.
   // Removing an exact capability row therefore returns this projection to legacy-map inference.
-  let inputModalities = staticPolicy.model.inputModalities
-    ? [...staticPolicy.model.inputModalities]
-    : undefined;
+  const resolvedModalities = staticPolicy.model.inputModalities ?? model.inputModalities
+    ?? (azureMetadata?.input ? modelInputModalities({ id: model.id, input_modalities: azureMetadata.input }, undefined) : undefined);
+  let inputModalities = resolvedModalities ? [...resolvedModalities] : undefined;
   // The shared vision-sidecar consumer predicate keeps catalog advertisement and request-time
   // planning aligned. The catalog must still advertise image input — the Codex app
   // gates attachments client-side on input_modalities, and a text-only entry would block images
@@ -294,7 +299,8 @@ export function applyProviderConfigHints(
     inputModalities = base.includes("image") ? [...base] : [...base, "image"];
   }
   const reasoningEfforts = configuredReasoningEfforts(prov, model.id);
-  const suppressSyntheticMax = modelRecordValue(prov.modelSuppressSyntheticMax, model.id) === true;
+  const suppressSyntheticMax = modelRecordValue(prov.modelSuppressSyntheticMax, model.id)
+    ?? (model.antigravityEffortWireModelIds !== undefined);
   const defaultReasoningEffort = staticPolicy.model.defaultReasoningEffort ?? model.defaultReasoningEffort;
   const supportsReasoningSummaries = staticPolicy.model.supportsReasoningSummaries;
   const supportsVerbosity = staticPolicy.model.supportsVerbosity;
@@ -310,14 +316,14 @@ export function applyProviderConfigHints(
     ...modelWithoutServiceTier
   } = model;
   // 已发现窗口只允许被配置值压低；缺窗口时，已开的 Context cap 就是实际窗口。
-  const discoveredWindow = typeof model.contextWindow === "number" && model.contextWindow > 0
-    ? model.contextWindow
-    : undefined;
+  const discoveredWindow = githubCopilotCatalogContextWindow(name, prov, model.id,
+    typeof model.contextWindow === "number" && model.contextWindow > 0 ? model.contextWindow : undefined);
   const projectedLimits = clampObservedModelLimits(staticPolicy.model, {
     ...(discoveredWindow !== undefined ? { contextWindow: discoveredWindow } : {}),
     ...(typeof model.maxInputTokens === "number" && model.maxInputTokens > 0 ? { maxInputTokens: model.maxInputTokens } : {}),
   });
   const hintedWindow = projectedLimits.contextWindow
+    ?? positiveSafeInteger(azureMetadata?.contextWindow)
     ?? (providerCap !== undefined ? resolveUnknownRoutedContextWindow(providerCap) : undefined);
   const hinted = {
     ...modelWithoutServiceTier,
@@ -382,8 +388,9 @@ export function catalogHintsFromProviderConfig(
   contextCap?: number,
   metadataModelIdCaseFold?: boolean,
   effectiveAlias?: string | null,
+  metadataConfigDir?: string,
 ): Partial<CatalogModel> {
-  const hinted = applyProviderConfigHints(name, prov, { id, provider: name }, contextCap, metadataModelIdCaseFold, effectiveAlias);
+  const hinted = applyProviderConfigHints(name, prov, { id, provider: name }, contextCap, metadataModelIdCaseFold, effectiveAlias, metadataConfigDir);
   const { provider: _provider, id: _id, ...hints } = hinted;
   return hints;
 }
@@ -395,8 +402,9 @@ export function applyConfigHintsToCachedModels(
   contextCap?: number,
   metadataModelIdCaseFold?: boolean,
   effectiveAlias?: string | null,
+  metadataConfigDir?: string,
 ): CatalogModel[] {
-  return models.map(model => applyProviderConfigHints(name, prov, model, contextCap, metadataModelIdCaseFold, effectiveAlias));
+  return models.map(model => applyProviderConfigHints(name, prov, model, contextCap, metadataModelIdCaseFold, effectiveAlias, metadataConfigDir));
 }
 
 /** Catalog slugs whose configured model must not gain a missing synthetic max rung. */
@@ -426,6 +434,25 @@ export function suppressedSyntheticMaxCatalogSlugs(
 export const QUIET_AUTHORITATIVE_CATALOG_PROVIDERS = new Set(["kimi", "xai"]);
 
 export const CALLABLE_CONFIGURED_COMPATIBILITY_MODELS: Readonly<Record<string, ReadonlySet<string>>> = {
+  // CodeBuddy's vendor defaults are real callable selectors — both the bundled manifests
+  // (`product.json` / `product.internal.json`) and `--model` accept them — but the key-scoped
+  // configuration roster omits them. Without this entry, a successful live roster
+  // would drop the configured default ("default" for CN, "default-model" for Global) from
+  // the catalog even though the client can still call it (maintainer review, #5147).
+  codebuddy: new Set([
+    "default-model",
+  ]),
+  "codebuddy-cn": new Set([
+    "default",
+  ]),
+  // MiniMax serves MiniMax-M3.1-Flash-Preview to Token Plan keys, but its /v1/models roster
+  // does not list the preview (probed 2026-09-30), so a live roster would drop it.
+  minimax: new Set([
+    "MiniMax-M3.1-Flash-Preview",
+  ]),
+  "minimax-cn": new Set([
+    "MiniMax-M3.1-Flash-Preview",
+  ]),
   kimi: new Set([
     "k3[1m]",
     "kimi-k2.7-code",
@@ -585,7 +612,12 @@ export function modelInputModalities(
   ))) {
     return ["text", "image"];
   }
-  return undefined;
+  // OpenGateway publishes modalities as { input: [...], output: [...] }, not an array.
+  // Append this fallback after all recognized signals so existing providers keep their
+  // resolution, and retain Codex's closed enum rather than advertising output modalities.
+  const nestedInput = normalizedStringList(plainRecord(item.modalities)?.input, 8, 24)
+    ?.filter(value => value === "text" || value === "image" || value === "audio");
+  return nestedInput && nestedInput.length > 0 ? nestedInput : undefined;
 }
 
 /**
@@ -669,6 +701,9 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
       // real values. Appended after the recognized fields for the same reason as the
       // llama.cpp entries above: no provider that already resolves changes behavior.
       capabilityRecord?.context_length,
+      // OpenGateway publishes a top-level context_window. Keep this last so catalogs
+      // already resolving through any recognized field retain their existing window.
+      item.context_window,
     );
   const maxInputTokens = positiveSafeInteger(limits?.max_input_tokens, item.max_input_tokens);
   const maxOutputTokens = positiveSafeInteger(
