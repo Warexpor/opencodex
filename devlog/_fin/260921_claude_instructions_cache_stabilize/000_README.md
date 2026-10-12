@@ -8,6 +8,11 @@ causes prompt-cache misses on Muse/Go.
 This change strips those dynamic footers from `instructions` and reattaches the
 latest notice as a trailing `input` message so the cacheable prefix stays stable.
 
+Since the upstream 2.83.0 merge, token footers are dropped instead of reattached
+(upstream's choice); TaskCreate nudges still move to a trailing `input` message.
+The fork keeps the peel on for every translated route with no opt-in flag. The
+measurements below predate that change. Moved here from the retired root `docs/`.
+
 ## Paper
 
 See [PAPER_OCXFIX.pdf](./PAPER_OCXFIX.pdf) (Warexpor).

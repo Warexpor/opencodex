@@ -274,17 +274,13 @@ describe("linear canonical notice extraction", () => {
 });
 
 describe("anthropicToResponsesTranslation cache-stabilize wire-in", () => {
-  test("ordinary caller with the exact unfenced suffix relocates the footer", () => {
+  test("ordinary caller with the exact unfenced suffix drops the footer", () => {
     const latest = footer(15_000_000);
     const system = ["You are Claude Code.", latest].join("\n\n");
     const { body } = translate(system);
     expect(body.instructions).toBe("You are Claude Code.");
     const input = userTurns(body);
-    expect(input[input.length - 1]).toEqual({
-      type: "message",
-      role: "user",
-      content: [{ type: "input_text", text: latest }],
-    });
+    expect(JSON.stringify(input)).not.toContain("<total_tokens>");
   });
 
   test("ordinary caller with the exact TaskCreate paragraph relocates the nudge", () => {
@@ -450,13 +446,12 @@ describe("Messages operator opt-in at the outbound boundary", () => {
   }
 
   for (const enabled of [undefined, false] as const) {
-    test(`ordinary HTTP caller relocates the footer with setting ${String(enabled)}`, async () => {
+    test(`ordinary HTTP caller drops the footer with setting ${String(enabled)}`, async () => {
       const notice = footer(15_000_000);
       const wire = await outbound(`System.\n\n${notice}`, enabled);
       expect(wire.instructions).toBe("System.");
       expect(wire.input).toEqual([
         { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-        { type: "message", role: "user", content: [{ type: "input_text", text: notice }] },
       ]);
       const expectedKey = createHash("sha256").update(JSON.stringify({
         model: "prefix/m",
@@ -498,7 +493,7 @@ describe("Messages operator opt-in at the outbound boundary", () => {
     expect(loadConfig().claudeCode?.stabilizePromptCache).toBe(false);
   });
 
-  test("a non-boolean stabilizePromptCache value does not disable relocation", () => {
+  test("a non-boolean stabilizePromptCache value does not disable the peel", () => {
     const notice = footer(1);
     const system = `System.\n\n${notice}`;
     const config = JSON.parse('{"stabilizePromptCache":"true"}') as OcxClaudeCodeConfig;
@@ -506,7 +501,6 @@ describe("Messages operator opt-in at the outbound boundary", () => {
     expect(body.instructions).toBe("System.");
     expect(body.input).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-      { type: "message", role: "user", content: [{ type: "input_text", text: notice }] },
     ]);
   });
 });

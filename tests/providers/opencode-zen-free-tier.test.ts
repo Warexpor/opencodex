@@ -13,11 +13,16 @@ import { parseRequest } from "../../src/responses/parser";
 import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
 import { handleChatCompletions } from "../../src/server/chat-completions";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
 
 describe("opencode zen free-tier path", () => {
   const originalFetch = globalThis.fetch;
+  let releaseSpendHome: (() => void) | undefined;
   afterEach(() => {
+    // Released first so a failed assertion cannot leave the spend-ledger lease live.
+    releaseSpendHome?.();
+    releaseSpendHome = undefined;
     globalThis.fetch = originalFetch;
   });
 
@@ -140,6 +145,8 @@ describe("opencode zen free-tier path", () => {
       providers: { "opencode-zen": provider },
     } as unknown as OcxConfig;
 
+    // A direct handler dispatch skips startServer, so it must hold the spend-ledger lease itself.
+    releaseSpendHome = acquireOwnedSpendHome();
     let seen: Headers | undefined;
     let seenBody = "";
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
