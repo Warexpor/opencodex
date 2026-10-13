@@ -683,7 +683,7 @@ export function createAdapterContinuations(
       // listener that can cancel its reader even while the parser holds the body lock.
       // The shared signal is not aborted on timeout: this generator must still emit
       // the error that the already-live Responses bridge turns into a terminal.
-      if (nextParsed.stream) {
+      if (nextParsed.stream || (response.headers.get("content-type") ?? "").includes("text/event-stream")) {
         yield* readResponseStreamWithInactivity(
           response,
           upstream.signal,

@@ -65,7 +65,11 @@ function userAgentAcceptsFreeTier(value: string | undefined): boolean {
   return true;
 }
 
-/** OpenCode `Identifier.create`: `prefix_` + 6-byte timestamp hex + 14 base62. */
+/**
+ * OpenCode `Identifier.create`: `prefix_` + 6-byte timestamp hex + 14 base62.
+ * Sessions are descending ids (timestamp bits inverted); Console's free-tier
+ * gate rejects a `ses_` id minted ascending (2026-10-13).
+ */
 function createOpenCodeId(prefix: "ses" | "msg"): string {
   const now = Date.now();
   if (now !== idLastMs) {
@@ -73,7 +77,8 @@ function createOpenCodeId(prefix: "ses" | "msg"): string {
     idCounter = 0;
   }
   idCounter += 1;
-  const packed = (BigInt(now) * 0x1000n + BigInt(idCounter)) & ((1n << 48n) - 1n);
+  const ascending = BigInt(now) * 0x1000n + BigInt(idCounter);
+  const packed = (prefix === "ses" ? ~ascending : ascending) & ((1n << 48n) - 1n);
   const hex = packed.toString(16).padStart(12, "0");
   const bytes = randomBytes(14);
   let tail = "";
@@ -81,8 +86,32 @@ function createOpenCodeId(prefix: "ses" | "msg"): string {
   return `${prefix}_${hex}${tail}`;
 }
 
+/** Decoded id timestamp must sit within this window of now (inverted for `ses_`). */
+const ID_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const ID_MAX_SKEW_MS = 24 * 60 * 60 * 1000;
+
+function openCodeIdTimestampMs(value: string, descending: boolean): number {
+  const raw = BigInt(`0x${value.slice(4, 16)}`);
+  const mask = (1n << 48n) - 1n;
+  const packed = descending ? ~raw & mask : raw;
+  // Only the low 48 bits of ms * 0x1000 survive; restore the high bits from now.
+  const span = 1n << 48n;
+  const nowPacked = BigInt(Date.now()) * 0x1000n;
+  let full = (nowPacked & ~mask) | packed;
+  if (full > nowPacked + span / 2n) full -= span;
+  else if (full < nowPacked - span / 2n) full += span;
+  return Number(full / 0x1000n);
+}
+
 export function isOpenCodeZenIdentifier(value: string, prefix: "ses" | "msg"): boolean {
-  return OC_ID.test(value) && value.startsWith(`${prefix}_`);
+  if (!OC_ID.test(value) || !value.startsWith(`${prefix}_`)) return false;
+  const recent = (descending: boolean) => {
+    const age = Date.now() - openCodeIdTimestampMs(value, descending);
+    return age <= ID_MAX_AGE_MS && age >= -ID_MAX_SKEW_MS;
+  };
+  // A session minted in the wrong direction is what Console rejects, so it must not pass.
+  const descending = prefix === "ses";
+  return recent(descending) && !recent(!descending);
 }
 
 /**
