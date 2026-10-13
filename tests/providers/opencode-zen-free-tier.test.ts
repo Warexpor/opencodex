@@ -12,6 +12,7 @@ import { PROVIDER_REGISTRY, getProviderRegistryEntry } from "../../src/providers
 import { parseRequest } from "../../src/responses/parser";
 import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
 import { handleChatCompletions } from "../../src/server/chat-completions";
+import { handleResponses } from "../../src/server/responses/core";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
@@ -19,7 +20,12 @@ import { withTestTranslatorBudget } from "../helpers/translator-budget";
 describe("opencode zen free-tier path", () => {
   const originalFetch = globalThis.fetch;
   let releaseSpendHome: (() => void) | undefined;
+  const savedSocks = { ALL_PROXY: process.env.ALL_PROXY, all_proxy: process.env.all_proxy };
   afterEach(() => {
+    for (const [key, value] of Object.entries(savedSocks)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     // Released first so a failed assertion cannot leave the spend-ledger lease live.
     releaseSpendHome?.();
     releaseSpendHome = undefined;
@@ -95,6 +101,33 @@ describe("opencode zen free-tier path", () => {
     expect(isOpenCodeZenIdentifier(session, "ses")).toBe(true);
   });
 
+  test("session ids are descending like OpenCode's and ascending ones are replaced", () => {
+    // Console's free-tier gate rejects an ascending ses_ id (2026-10-13). Pin to the clock
+    // that minted these ids, captured from OpenCode 1.18.29.
+    const realNow = Date.now;
+    Date.now = () => 1_791_902_765_000;
+    try {
+      expect(isOpenCodeZenIdentifier("ses_eca460d85ffeIj7pkg4yxND6rK", "ses")).toBe(true);
+      expect(isOpenCodeZenIdentifier("msg_135b9f297001Gp7pfvGFtRTQPX", "msg")).toBe(true);
+      expect(isOpenCodeZenIdentifier("ses_135b9f297001Gp7pfvGFtRTQPX", "ses")).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
+
+    const entry = getProviderRegistryEntry("opencode-free")!;
+    const mask = (1n << 48n) - 1n;
+    const ascending = BigInt(Date.now()) * 0x1000n & mask;
+    const minted = deriveOpenCodeZenSessionId("descending-check");
+    const decoded = ~BigInt(`0x${minted.slice(4, 16)}`) & mask;
+    expect(Math.abs(Number((decoded - ascending) >> 12n))).toBeLessThan(60_000);
+    const replaced = resolveOpenCodeZenTransport({
+      ...providerConfigSeed(entry),
+      headers: { "x-opencode-session": `ses_${ascending.toString(16).padStart(12, "0")}Ij7pkg4yxND6rK` },
+    });
+    expect(isOpenCodeZenIdentifier(replaced.headers?.["x-opencode-session"] ?? "", "ses")).toBe(true);
+    expect(replaced.headers?.["x-opencode-session"]?.startsWith(`ses_${ascending.toString(16)}`)).toBe(false);
+  });
+
   test("explicit non-desktop client overrides survive", () => {
     const entry = getProviderRegistryEntry("opencode-free")!;
     const provider = resolveOpenCodeZenTransport({
@@ -145,6 +178,9 @@ describe("opencode zen free-tier path", () => {
       providers: { "opencode-zen": provider },
     } as unknown as OcxConfig;
 
+    // An ambient SOCKS5 ALL_PROXY routes dispatch around the mocked fetch.
+    delete process.env.ALL_PROXY;
+    delete process.env.all_proxy;
     // A direct handler dispatch skips startServer, so it must hold the spend-ledger lease itself.
     releaseSpendHome = acquireOwnedSpendHome();
     let seen: Headers | undefined;
@@ -187,6 +223,41 @@ describe("opencode zen free-tier path", () => {
     expect(upstream.stream).toBe(true);
     expect(upstream.tools?.[0]?.function?.name).toBe("bash");
     expect(upstream.tools?.some(tool => tool.function?.name === "grep")).toBe(true);
+  });
+
+  test("a non-streaming Responses client folds the SSE Zen free tier is forced onto", async () => {
+    const entry = getProviderRegistryEntry("opencode-free")!;
+    const config = {
+      defaultProvider: "opencode-free",
+      providers: { "opencode-free": providerConfigSeed(entry) },
+    } as unknown as OcxConfig;
+    delete process.env.ALL_PROXY;
+    delete process.env.all_proxy;
+    releaseSpendHome = acquireOwnedSpendHome();
+    let upstreamStream: unknown;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamStream = JSON.parse(typeof init?.body === "string" ? init.body : "{}").stream;
+      const chunk = (delta: Record<string, unknown>, finish: string | null) =>
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", model: "big-pickle", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      return new Response(`${chunk({ role: "assistant", content: "pong" }, null)}${chunk({}, "stop")}data: [DONE]\n\n`, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    const res = await handleResponses(
+      new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "opencode-free/big-pickle", input: "ping", stream: false }),
+      }),
+      config,
+      { model: "", provider: "" },
+    );
+    expect(upstreamStream).toBe(true);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { status?: string; output?: Array<{ content?: Array<{ text?: string }> }> };
+    expect(body.status).toBe("completed");
+    expect(body.output?.flatMap(item => item.content ?? []).map(part => part.text).join("")).toBe("pong");
   });
 
   test("paid Zen models do not inherit the free-tier tool catalog", () => {

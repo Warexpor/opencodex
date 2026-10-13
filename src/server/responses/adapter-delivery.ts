@@ -203,12 +203,15 @@ export async function deliverAdapterResponse(
     });
   }
 
+  // Zen's free tier also forces SSE upstream for a JSON client, so the wire wins over the request.
+  const upstreamAnswersStream = upstreamRequestsStream
+    || (upstreamResponse.headers.get("content-type") ?? "").includes("text/event-stream");
   if (transportState.activeAdapter.parseResponse
-    || (upstreamRequestsStream && transportState.activeAdapter.parseStream)) {
+    || (upstreamAnswersStream && transportState.activeAdapter.parseStream)) {
     let events: AdapterEvent[];
     try {
       const initialEvents: AdapterEvent[] = [];
-      if (upstreamRequestsStream && transportState.activeAdapter.parseStream) {
+      if (upstreamAnswersStream && transportState.activeAdapter.parseStream) {
         // The canonical ChatGPT adapter coerces its actual upstream request to SSE even for a
         // JSON client. Routed compaction still owns the non-streaming client response, so fold
         // that SSE through the adapter instead of handing it to parseResponse as JSON.
