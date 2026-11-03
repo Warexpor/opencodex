@@ -20,6 +20,18 @@ approval and sandbox path. `nativeLocalExec: "on"` is the explicit config-owner 
 local experiments; `off` and the backwards-compatible `codex-sandbox` spelling both fail closed.
 MCP, screen recording, and computer-use stay on their separate explicit executor/MCP config paths.
 
+For native `grep` directory searches, `src/adapters/cursor/native-exec-fs.ts` compiles the optional
+filter once with `Bun.Glob`. A pattern without `/` matches each basename at every depth; a pattern
+with `/` matches the path relative to the selected search root, using `/` on every platform;
+an optional leading `./` keeps that root-relative scope.
+This supports `**/*.ts`, brace alternatives and character classes; Bun 1.4.4 also supplies extglobs
+and brace ranges. Empty filters keep the unfiltered search. The existing directory walk skips
+`node_modules`, `.git` and symlink entries, collects at most 500 matching files, reads only files
+at most 1,000,000 bytes, and returns at most 200 files with text matches. Glob matching never
+expands or changes the search root. Explicit single-file searches retain their existing behavior.
+`tests/providers/cursor/cursor-native-grep-globs.test.ts` exercises the dispatch gate, file selection,
+all three output modes, traversal exclusions and runtime-specific syntax.
+
 Foreground `shellArgs` and `shellStreamArgs` are unavailable on every platform, including with
 `nativeLocalExec: "on"`. `src/adapters/cursor/native-foreground-shell.ts` rejects them before spawn
 until a kernel-backed descendant owner exists; process-group disappearance is not cleanup proof.
@@ -111,6 +123,14 @@ The checkpoint instruction digest includes the format, so a changed schema force
 `tests/providers/cursor/cursor-request-builder.test.ts` checks checkpoint invalidation.
 
 ## Cursor parameterized models
+
+`src/adapters/cursor/catalog.ts` splits thinking/effort variants at the last `-thinking-`
+delimiter and validates its suffix once. `src/adapters/cursor/claude-id.ts` recognizes the
+numeric Claude base before parsing thinking, fast, and effort markers with linear string
+operations. Both retain legacy spelling, marker precedence, and unknown-ID behavior;
+`tests/providers/cursor/cursor-catalog.test.ts` and
+`tests/providers/cursor/cursor-claude-id.test.ts` compare legacy regex results and exercise
+long repeated-delimiter inputs without wall-clock assertions.
 
 Cursor Router's parameterized `default` model is represented in Codex by four catalog rows:
 `cursor/auto` preserves Cursor's team/account default, while `cursor/auto-cost`,
@@ -252,6 +272,15 @@ required string `input` in a closed object, retaining that tool's string-valued
 input description from the parser (including patch-envelope guidance). Other input
 constraints cannot widen the canonical shape. Bare shell bridge names are rejected
 on the freeform path.
+On the way back, `src/adapters/cursor/freeform-args.ts` gates every completed freeform
+call before emission. It accepts a string `input` byte-identical, and otherwise applies
+the shared Responses unwrap rule — no `input` key and exactly one string-valued fallback
+field from `freeformFallbackKeys` (for example `code` on bare `exec`) — re-emitting
+`{input}`. Every other shape fails closed with an error that names only allowlisted key
+names with their value kinds and counts every other key; values and request-derived key
+names never reach the persisted log. Freeform string args decode without JSON re-parsing, so a body that is itself
+valid JSON stays a string (#7049). Coverage lives in
+`tests/providers/cursor/cursor-freeform-args.test.ts`.
 Namespaced tools do not acquire bare-shell behavior. Regression coverage lives in
 `tests/providers/cursor/cursor-tool-definitions.test.ts`.
 
@@ -262,7 +291,7 @@ Canonical Spark Lite metadata follows the final serialized model and surviving n
 
 Shared raw-reasoning events retain content-channel presentation; provider-authored thinking keeps its existing summary path. See [bridge contract](chat-compat.md).
 
-Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](../transports/responses.md) documents this boundary, and native Chat removes effort only for an explicit empty declaration or no-reasoning model.
+Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](../transports/responses.md) documents this boundary, and native Chat also honors explicit per-axis capability declarations.
 
 ## Textual pseudo tool-call quarantine
 

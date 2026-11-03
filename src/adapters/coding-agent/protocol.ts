@@ -1,6 +1,7 @@
 import { namespacedToolName, type AdapterEvent, type OcxMessage, type OcxParsedRequest, type OcxUsage } from "../../types";
 import type { TranslatorBudget } from "../../lib/translator-budget";
 import { isValidCodingAgentToolNamePart } from "./tool-catalog";
+import { anthropicCacheWrite1hTokens } from "../anthropic/cache-retention";
 
 /**
  * Shared stream-json protocol for official coding-agent CLIs (CodeBuddy Code and Qoder CLI).
@@ -154,17 +155,19 @@ function asString(value: unknown): string | undefined {
 
 /** Extract OpenCodex usage from the Anthropic-shaped usage record shared by frames and deltas. */
 function usageFromAnthropicShape(usage: Record<string, unknown>): OcxUsage | undefined {
-  const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
-  const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
-  const cachedInputTokens = typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : undefined;
-  const cacheCreationInputTokens =
-    typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : undefined;
+  const count = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+  // Anthropic input_tokens excludes cache reads/writes; the OpenCodex contract includes them
+  // (normalizeCostTokens drops a turn whose cache counters exceed its input).
+  const freshInputTokens = count(usage.input_tokens);
+  const outputTokens = count(usage.output_tokens);
   // A snapshot is zero-only when every counter is absent or zero. Testing only the cache-read
   // field dropped a cache-creation-only snapshot (input/output 0 with, say, 200 cache-creation
   // tokens), and a capture-only tool leg terminated at message_stop never sees a result frame
   // that could carry those tokens instead, so the turn under-reported usage and cost.
-  const cacheReadTotal = cachedInputTokens ?? 0;
-  const cacheCreationTotal = cacheCreationInputTokens ?? 0;
+  const cacheReadTotal = count(usage.cache_read_input_tokens);
+  const cacheCreationTotal = count(usage.cache_creation_input_tokens);
+  const cacheCreation1h = anthropicCacheWrite1hTokens(usage, cacheCreationTotal);
+  const inputTokens = freshInputTokens + cacheReadTotal + cacheCreationTotal;
   if (inputTokens === 0 && outputTokens === 0 && cacheReadTotal === 0 && cacheCreationTotal === 0) {
     return undefined;
   }
@@ -174,6 +177,7 @@ function usageFromAnthropicShape(usage: Record<string, unknown>): OcxUsage | und
     totalTokens: inputTokens + outputTokens,
     ...(cacheReadTotal > 0 ? { cachedInputTokens: cacheReadTotal, cacheReadInputTokens: cacheReadTotal } : {}),
     ...(cacheCreationTotal > 0 ? { cacheCreationInputTokens: cacheCreationTotal } : {}),
+    ...(cacheCreationTotal > 0 && cacheCreation1h !== undefined ? { cacheCreation1hInputTokens: cacheCreation1h } : {}),
   };
 }
 
@@ -191,22 +195,31 @@ export function usageFromResult(message: StreamMessage): OcxUsage | undefined {
  * authoritative for a text-only turn; partial state exists so a capture-only tool-bridge turn —
  * which is terminated at `message_stop` before any result frame can arrive — still reports real
  * token usage instead of zero.
+ * This is a cumulative single-message leg: capture-only MCP never answers, and the runner stops
+ * at that assistant's message_stop. A completed CLI result is authoritative for an entire turn.
+ * This maximum fold is not an accounting interface for a future persistent multi-iteration SDK.
  */
 function mergePartialUsage(previous: OcxUsage | undefined, next: OcxUsage): OcxUsage {
   if (!previous) return next;
-  const inputTokens = Math.max(previous.inputTokens, next.inputTokens);
   const outputTokens = Math.max(previous.outputTokens, next.outputTokens);
   const cacheRead = Math.max(
     previous.cacheReadInputTokens ?? previous.cachedInputTokens ?? 0,
     next.cacheReadInputTokens ?? next.cachedInputTokens ?? 0,
   );
   const cacheCreation = Math.max(previous.cacheCreationInputTokens ?? 0, next.cacheCreationInputTokens ?? 0);
+  const cacheCreation1h = Math.min(cacheCreation,
+    Math.max(previous.cacheCreation1hInputTokens ?? 0, next.cacheCreation1hInputTokens ?? 0));
+  // Inclusive inputs: fold each snapshot's fresh part, then add the folded cache counters once.
+  const freshInput = (usage: OcxUsage) => Math.max(0, usage.inputTokens
+    - (usage.cacheReadInputTokens ?? usage.cachedInputTokens ?? 0) - (usage.cacheCreationInputTokens ?? 0));
+  const inputTokens = Math.max(freshInput(previous), freshInput(next)) + cacheRead + cacheCreation;
   return {
     inputTokens,
     outputTokens,
     totalTokens: inputTokens + outputTokens,
     ...(cacheRead > 0 ? { cachedInputTokens: cacheRead, cacheReadInputTokens: cacheRead } : {}),
     ...(cacheCreation > 0 ? { cacheCreationInputTokens: cacheCreation } : {}),
+    ...(cacheCreation1h > 0 ? { cacheCreation1hInputTokens: cacheCreation1h } : {}),
   };
 }
 
@@ -718,11 +731,16 @@ function imagePart(imageUrl: string): WireContentPart | undefined {
   return undefined;
 }
 
-function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: ReadonlyMap<string, string>): string {
+/** Render replay prose; only Qoder opts into unsupported-reference history markers. */
+export function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: ReadonlyMap<string, string>, markUnsupportedImages = false): string {
   if (message.role === "user") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : `[${p.type}]`)).join("\n");
+      : message.content.map(p => {
+        if (p.type === "text" || p.type === "document") return p.text;
+        if (markUnsupportedImages && p.type === "image" && !imagePart(p.imageUrl)) return "[image omitted: unsupported reference]";
+        return `[${p.type}]`;
+      }).join("\n");
     return `USER:\n${text}`;
   }
   if (message.role === "assistant") {
@@ -745,7 +763,11 @@ function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: Readonl
   if (message.role === "toolResult") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : "[image]")).join("");
+      : message.content.map(p => {
+        if (p.type === "text" || p.type === "document") return p.text;
+        if (markUnsupportedImages && p.type === "image" && !imagePart(p.imageUrl)) return "[image omitted: unsupported reference]";
+        return "[image]";
+      }).join("");
     const status = message.isError ? " (error)" : "";
     return `TOOL RESULT (call_id: ${message.toolCallId})${status}:\n${text}`;
   }
@@ -761,7 +783,7 @@ function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: Readonl
  */
 export function buildInputLines(
   message: OcxMessage,
-  options: { vendorNameByWire?: ReadonlyMap<string, string> } = {},
+  options: { vendorNameByWire?: ReadonlyMap<string, string>; markUnsupportedImages?: boolean } = {},
 ): string[] {
   if (message.role === "developer") return [];
 
@@ -775,6 +797,7 @@ export function buildInputLines(
         else if (part.type === "image") {
           const image = imagePart(part.imageUrl);
           if (image) content.push(image);
+          else if (options.markUnsupportedImages) content.push(textPart("[image omitted: unsupported reference]"));
         } else if (part.type === "document") {
           content.push(textPart(part.text));
         } else {
@@ -783,7 +806,7 @@ export function buildInputLines(
       }
     }
   } else {
-    const formatted = formatMessageForHistory(message, options.vendorNameByWire);
+    const formatted = formatMessageForHistory(message, options.vendorNameByWire, options.markUnsupportedImages);
     if (formatted) content.push(textPart(formatted));
   }
 
@@ -819,7 +842,7 @@ export function buildSystemPrompt(parsed: OcxParsedRequest): string | undefined 
  */
 export function buildConversationInput(
   parsed: OcxParsedRequest,
-  options: { maxHistoryChars?: number; vendorNameByWire?: ReadonlyMap<string, string> } = {},
+  options: { maxHistoryChars?: number; vendorNameByWire?: ReadonlyMap<string, string>; markUnsupportedImages?: boolean } = {},
 ): string[] {
   const nonDev = parsed.context.messages.filter(m => m.role !== "developer");
   if (nonDev.length === 0) {
@@ -827,7 +850,7 @@ export function buildConversationInput(
   }
 
   if (nonDev.length === 1 && nonDev[0]!.role === "user") {
-    return buildInputLines(nonDev[0]!, { vendorNameByWire: options.vendorNameByWire });
+    return buildInputLines(nonDev[0]!, options);
   }
 
   // Multi-turn conversation or history with tool results:
@@ -898,14 +921,14 @@ export function buildConversationInput(
     const status = currentMessage.isError ? " (error)" : "";
     currentRequestText = `TOOL RESULT (call_id: ${currentMessage.toolCallId})${status}:\n${text}\n\nPlease proceed based on the above tool result.`;
   } else {
-    currentRequestText = formatMessageForHistory(currentMessage, options.vendorNameByWire);
+    currentRequestText = formatMessageForHistory(currentMessage, options.vendorNameByWire, options.markUnsupportedImages);
   }
 
   const imageBlocks: WireContentPart[] = [...historyImageBlocks, ...currentImageBlocks];
 
   const maxHistoryChars = options.maxHistoryChars ?? MAX_PROJECTED_HISTORY_CHARS;
   let historyText = historyMessages
-    .map(msg => formatMessageForHistory(msg, options.vendorNameByWire))
+    .map(msg => formatMessageForHistory(msg, options.vendorNameByWire, options.markUnsupportedImages))
     .filter(Boolean)
     .join("\n\n");
   if (historyText.length > maxHistoryChars) {

@@ -28,6 +28,7 @@
  */
 import { writeFileSync } from "node:fs";
 import { loadConfig } from "../config";
+import { ClientPathError } from "../clients/client-path";
 import {
   EXPORT_CLIENTS,
   EXPORT_CLIENT_IDS,
@@ -38,6 +39,7 @@ import {
   type ExportModel,
 } from "../clients/config-export";
 import { opencodeCatalogFromProxyRows, type OpencodeProxyModelRow } from "./opencode";
+import { integrationModelNames } from "./integration-input";
 import type { OcxConfig } from "../types";
 import {
   CliUsageError,
@@ -53,7 +55,7 @@ import {
 } from "./runtime-api";
 
 const USAGE = `Usage:
-  ocx export --client <${EXPORT_CLIENT_IDS.join("|")}> [--json] [--out <path>] [--force]`;
+  ocx export --client <${EXPORT_CLIENT_IDS.join("|")}> [--model-names <alias|routed>] [--json] [--out <path>] [--force]`;
 
 export interface ExportCommandDeps extends RuntimeApiDeps {
   /** Live config seam; tests inject a fixture instead of reading the user's config. */
@@ -93,6 +95,9 @@ export function exportModelsFromProxyRows(
     if (entry.maxTokens !== undefined) model.maxTokens = entry.maxTokens;
     if (entry.maxInputTokens !== undefined) model.maxInputTokens = entry.maxInputTokens;
     if (entry.reasoningEfforts !== undefined) model.reasoningEfforts = [...entry.reasoningEfforts];
+    if (entry.supportsThinkingToggle !== undefined) model.supportsThinkingToggle = entry.supportsThinkingToggle;
+    if (entry.supportsReasoningEffort !== undefined) model.supportsReasoningEffort = entry.supportsReasoningEffort;
+    if (entry.defaultThinkingEnabled !== undefined) model.defaultThinkingEnabled = entry.defaultThinkingEnabled;
     if (entry.defaultReasoningEffort) model.defaultReasoningEffort = entry.defaultReasoningEffort;
     if (entry.inputModalities && entry.inputModalities.length > 0) {
       model.inputModalities = [...entry.inputModalities];
@@ -160,6 +165,7 @@ export async function handleExportCommand(argv: string[], deps: ExportCommandDep
   return runCliAction(async () => {
     const args = [...argv];
     const client = parseClient(args);
+    const modelNames = integrationModelNames(args, client, "export", USAGE);
     const wantsJson = takeFlag(args, "--json");
     const force = takeFlag(args, "--force");
     const out = takeOption(args, "--out");
@@ -168,13 +174,15 @@ export async function handleExportCommand(argv: string[], deps: ExportCommandDep
     const spec = EXPORT_CLIENTS[client];
     const root = await runtimeBaseUrl(deps);
     let built: { document: unknown; text: string };
-    if (client === "raycast" || client === "droid") {
+    if (modelNames !== undefined || client === "t3code" || client === "raycast" || client === "droid" || client === "qoder" || client === "qoder-cn" || client === "workbuddy" || client === "workbuddy-ai") {
       // The dial address alone cannot distinguish a wildcard authenticated bind
       // from loopback. Let the live server resolve its admission/listener policy;
       // saved config can differ from the process serving this request.
+      const passive = client === "hermes" || client === "commandcode";
+      const query = `client=${client}${passive ? "&preview=1" : ""}${modelNames === undefined ? "" : `&modelNames=${modelNames}`}`;
       const exported = await runtimeRequest<{
         client: string; format: string; config: unknown; text: string;
-      }>(`/api/client-config?client=${client}`, {}, { ...deps, baseUrl: root });
+      }>(`/api/client-config?${query}`, {}, { ...deps, baseUrl: root });
       if (!exported || exported.client !== client || exported.format !== spec.format
         || typeof exported.text !== "string" || exported.config === undefined) {
         throw new RuntimeApiError(`Management API returned an unexpected ${client} export payload.`, 502, null);
@@ -193,6 +201,18 @@ export async function handleExportCommand(argv: string[], deps: ExportCommandDep
     const clientConfig = built.document;
     const text = built.text;
 
+    // Resolve the human-facing destination BEFORE writing anything. A client whose
+    // config location cannot be determined (a relative override, or ZCode bootstrap
+    // settings naming an unknown data root) still exports the document: the export
+    // writes nothing into the client and the destination is advisory text.
+    let destination: string;
+    try {
+      destination = spec.destination(process.env);
+    } catch (error) {
+      if (!(error instanceof ClientPathError)) throw error;
+      destination = `unknown (${error.message})`;
+    }
+
     // Every serializer already ends with exactly one newline.
     if (out !== undefined) writeExport(out, text, force);
     // stderr, so `--json` stdout stays a standalone JSON document.
@@ -208,7 +228,7 @@ export async function handleExportCommand(argv: string[], deps: ExportCommandDep
       ...text.trimEnd().split("\n"),
       "",
       ...(out !== undefined ? [`Wrote ${out}`] : []),
-      `Destination: ${spec.destination(process.env)}`,
+      `Destination: ${destination}`,
       "Merge this generated configuration into that file; do not replace it.",
       `Before launching: ${spec.exportHint}`,
       `${modelCount} model${modelCount === 1 ? "" : "s"}; ${modelsWithoutLimits} omit context limits (the client applies its own defaults).`,

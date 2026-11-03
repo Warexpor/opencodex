@@ -37,10 +37,9 @@ tavsiye değildir; Anthropic'in güncel koşullarını kontrol edin.
 Etkinleştirildiğinde operasyonel sözleşme:
 
 - Yukarı akıştan gelen **429**, varsa `Retry-After` (yoksa varsayılan bir geri
-  çekilme) kullanarak o hesabı soğutur, bağlılıklarını temizler ve aynı istek
-  içinde uygun başka bir hesaba dönebilir (sınırlı).
-- Bağlılık **işleme özeldir (process-local)** (proxy yeniden başlatıldığında
-  kaybolur).
+  çekilme) kullanarak o hesabı soğutur ve aynı istek içinde uygun başka bir hesaba
+  dönebilir (sınırlı). Yalnızca ortak kota reddi bağlılıkları temizler; geçici hız sınırlaması bunları korur.
+- Bağlılık aynı yapılandırma dizini ve sağlayıcı örneğinde yeniden başlatma sonrasında korunur (24 saat boşta kalma, en yeni 2.000 bağ). Özel dosya yalnızca oturum ve giriş kimliği özetlerini saklar; ham oturum anahtarı veya token içermez. Kalıcı giriş kimliği olmayan eski hesaplar yeniden girişe kadar işleme özeldir. Token yenileme bağı korur; yeniden giriş, kaldırma, duraklatma, yeniden kimlik doğrulama gereksinimi veya çalışma sırasında elle hesap seçimi bağı geçersiz kılar. Geçici hız sınırlaması nedeniyle başka hesaba yönelme özgün bağı değiştirmez.
 - Token yenileme hataları mevcut `needsReauth` kuralını korur. Doğrulanmış abonelik veya hesap ödeme 403 hatası çıktı başlamadan hesap değiştirebilir; soğuma `Retry-After` veya varsayılan on dakikadır. Genel izin reddi terminal kalır. Bkz. [hesap kurtarma](/guides/claude-code/).
 - Uygun tüm hesaplar soğutuluyorsa, proxy bilindiğinde `Retry-After` ile
   birlikte **429** (401 değil) döndürür.
@@ -69,6 +68,7 @@ bağlanmış olarak Claude Code'u başlatır:
 | `ANTHROPIC_MODEL` | `claudeCode.model` (isteğe bağlı) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claudeCode.tierModels.haiku ?? claudeCode.smallFastModel` (isteğe bağlı; eski `ANTHROPIC_SMALL_FAST_MODEL` da geçerlidir) |
 | `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE}_MODEL` | `claudeCode.tierModels.*`; abonelikle başlatmada ayarlanmamışsa yerel `claude-opus-5-5[1m]` / `claude-sonnet-5-5[1m]` / `claude-fable-5-1[1m]` |
+| `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE,HAIKU}_MODEL_NAME` | OpenCodex'in yönlendirilmiş bir takma ada ayarladığı katman yuvasının `/model` etiketi (örneğin `ocx-claude-native--gpt-6.1-sol` → `gpt-6.1-sol (native)`). Aynı çift launchd sistem ortamına ve kabuk kancasına da yazılır. Model kimliği takma ad olarak kalır. Kendi ayarladığınız yuva veya etiket değiştirilmez |
 | `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | `alwaysEnableEffort` açık olduğunda `1` (koşullu) |
 | `ENABLE_TOOL_SEARCH` | `claudeCode.toolSearch` ayarlandığında (koşullu; varsayılan olarak kapalı) |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | `maxContextTokens` ayarlandığında eski bağlam geçersiz kılma (koşullu) |
@@ -183,29 +183,29 @@ vekilin ayarları üzerine yazılmaz. Mod değiştirince Desktop'ı tamamen kapa
 
 ### Claude Code CLI first-party
 
-Bağlantı → Claude bölümünde CLI anahtarını açın veya `ocx claude config set --first-party on` çalıştırın; kapatmak için `off` kullanın. Yerel vekil kullanılamıyorsa, CA hazırlanamazsa, ayarlar okunamazsa veya anahtarlar başka bir programa aitse açma isteği reddedilir. Kapatma yine de kaydedilir. Yalnız Desktop first-party açıkken terminalde tamamen yerel bağlantı için kabukta `NO_PROXY='*'` ayarlayın. Yukarıdaki hesap riski CLI için de geçerlidir.
+Bağlantı → Claude bölümünde CLI anahtarını açın veya `ocx claude config set --first-party on` çalıştırın; kapatmak için `off` kullanın. Yerel vekil kullanılamıyorsa, CA hazırlanamazsa, ayarlar okunamazsa veya anahtarlar başka bir programa aitse açma isteği reddedilir. Kapatma yine de kaydedilir. Yalnız Desktop first-party açıkken terminalde tamamen yerel bağlantı için kabukta `NO_PROXY='*'` ayarlayın. Yukarıdaki hesap riski CLI için de geçerlidir. First-party açıkken OpenCodex, yerel MCP sunucularının (`*.localhost` adları dahil) vekili atlaması için `~/.claude/settings.json` içindeki `NO_PROXY` değerine `127.0.0.1`, `localhost`, `::1` ve `0.0.0.0` girdilerini de ekler; diğer `127.x` adreslerini kendiniz ekleyin. Mevcut bir `NO_PROXY` değerine yalnızca eksik girdiler eklenir; kapatıldığında önceki değer, OpenCodex onu kaydedebildiyse ve siz o zamandan beri değiştirmediyseniz geri yüklenir, aksi halde eklenen girdiler dahil mevcut değer korunur.
 Claude yönlendirmesini kapatmak yönetilen vekil ayarlarını korur. Dinleyici çalışırken tüm Messages istekleri değiştirilmeden iletilir; durduğunda OpenCodex çalışana veya Desktop/CLI first-party kapatılana kadar doğrudan `claude` bağlanamaz. `ocx claude` yerel başlatması `NO_PROXY=*` değerini yalnızca yönetilen ayarlar varken ve yabancı bir HTTPS vekili miras alınmamışken ayarlar. Aksi halde yabancı vekili korur ve ayarlardaki kesmenin sürdüğünü bildirir: first-party özelliğini kapatın veya ayarı kaldırın.
 Arayüz okunamayan ayarları (unknown), opencodex belirteçli URL ile yabancı CA birleşimini (foreign: HTTPS_PROXY / NODE_EXTRA_CA_CERTS değerlerini elle düzeltin) ve Claude yönlendirmesi kapalıyken dinleyicinin istekleri değiştirmeden iletmeye devam etmesini (disabled: yeniden başlatmadan önce first-party modunu kapatın) ayırt eder. Dinleyici yoksa stopped; yönetilen CA ile port veya belirteç uyuşmuyorsa broken durumudur. First-party açıkken kesme kullanılamıyorsa stopped ve broken, routingOff uyarısını gösterir: Claude yönlendirmesi veya kesme kapalı ya da bu makine başka bir opencodex merkezinin istemcisidir; bu makinede yeniden etkinleştirin veya ayarları kaldırmak için first-party modunu kapatın. Kesme kullanılabilirken stopped opencodex uygulamasını başlatmayı, broken ise `ocx ensure` ya da yeniden başlatmayı önerir. Yalnız CLI açık ama vekil yoksa uygulanmadı, tek istemci açık ve vekil çalışıyorsa paylaşılan iletim, iki istemci kapalıyken vekil kalmışsa artık ayar uyarısı görünür.
 unknown, ayarların hâlâ opencodex vekiline işaret edip etmediğinin belirlenemediği anlamına gelir. Yabancı CA ile birlikte 127.0.0.1 üzerindeki belirteçsiz vekil local durumudur: sahipliği doğrulanamaz; artık kullanmıyorsanız ~/.claude/settings.json içindeki HTTPS_PROXY değerini kaldırın. disabled yalnızca ayarlar çalışan dinleyiciyle eşleşiyorsa geçerlidir; port veya belirteç farklıysa yönlendirme kapalı olsa bile broken görünür.
 
 ### Picker modu: first-party Code sekmesinde opencodex modelleri
 
-Picker modu first-party modunun bir parçasıdır. macOS'ta first-party seçildiğinde varsayılan olarak
+Picker modu first-party modunun bir parçasıdır. macOS ve Windows'ta first-party seçildiğinde varsayılan olarak
 açıktır; `claudeCode.intercept.picker: false` ayarlanırsa kapalı kalır. First-party Desktop'ın Code
 sekmesindeki model seçiciyi değiştirerek kullanılabilir opencodex modellerini adlarıyla listeler.
-İlk etkinleştirmede macOS, giriş anahtar zincirinde yerel bir sertifika yetkilisine güvenmenizi isteyebilir.
+İlk etkinleştirmede macOS, giriş anahtar zincirinde, Windows ise geçerli kullanıcının kök deposunda yerel bir sertifika yetkilisine güvenmenizi isteyebilir.
 Bu yetkili `claude.ai` ve alt alan adlarıyla sınırlıdır. Dışa aktarılabilir imzalama kimliği işletim sisteminin
 kimlik bilgisi deposunda korunur ve normal yeniden başlatmalarda aynı sertifika ve anahtar yeniden kullanılır.
 OpenCodex yapılandırma dizininde düz metin picker imza anahtarı saklanmaz. Kısıtlı CA'nın tam doğrulaması ve
-sistemdeki güven denetimi devam eder. Onaylanmış kimlik aynıysa ve depo erişilebilirse yeniden başlatma,
-sertifika güven ayarlarını eklemez veya kaldırmaz. Başlangıçta geri yükleme hiçbir zaman güven yüklemez:
+sistemdeki güven denetimi devam eder (Windows'ta tam parmak izi ve doğrulanmış yaprak ile). Onaylanmış kimlik aynıysa ve depo erişilebilirse yeniden başlatma,
+macOS sertifika güven ayarlarını eklemez veya kaldırmaz. Başlangıçta geri yükleme ve durum denetimi hiçbir zaman güven yüklemez:
 güven eksik, iptal edilmiş veya bilinmiyorsa picker beklemede kalır. Güven vermek için açıkça
-`ocx claude desktop picker on` veya `ocx claude desktop picker trust` komutunu çalıştırın.
+`ocx claude desktop picker on` veya `ocx claude desktop picker trust` komutunu çalıştırın, gerekiyorsa Windows onayıyla birlikte.
 
 Eski bir kimlikten bir defalık geçişte önceki güveni kaldırmak için onay gerekebilir. Temizlik tamamlanana
 kadar picker kullanılamaz ve uygulanmış profil şifre çözmeyen bir aktarma kullanır. macOS ayrıca anahtar
 zincirinin kilidini açmanızı veya uygulamanın kimlik bilgilerine erişimini onaylamanızı isteyebilir;
-bu istemler yeniden başlatma veya güncelleme sonrasında da çıkabilir. Windows ve Linux'ta picker desteklenmez:
+bu istemler yeniden başlatma veya güncelleme sonrasında da çıkabilir. Windows'ta açık `on` veya `trust` kök ekleme onayını gösterebilir. Linux'ta picker desteklenmez:
 picker CA, kimlik bilgisi deposu veya proxy işlemleri başlatılmaz. Ana Claude yakalama işlevi kullanılabilir;
 yerel CA dosyaları için sahiplik, sembolik bağlantı, dosya izinleri ve Windows ACL denetimleri uygulanır.
 
@@ -217,6 +217,8 @@ seçildikten sonra Claude Desktop'ı tamamen kapatıp yeniden açın.
 
 Picker modu first-party'nin parçasıdır; bu nedenle [first-party hesap riski](#first-party-isteğe-bağlı)
 aynı şekilde geçerlidir.
+
+Üst sunucunun ilk yanıtından önce, 60 saniye boyunca ilerlemeyen picker yüklemesi kapatılır. Süre dolduğunda yükleme başarı yanıtı olmadan kesilir; HTTP/2’de yalnızca ilgili akış sıfırlanır. Üst sunucunun geri basıncı nedeniyle aktarım duraklatıldığında bu boşta kalma sayacı da duraklatılır; yükleme tamamlandığında veya ilk yanıt geldiğinde kaldırılır. Bu boşta kalma koruması toplam yükleme süresine ek bir sınır getirmez; mevcut çalışma zamanı ve protokol sınırları geçerliliğini korur. Yanıt akışları bu sayacın kapsamı dışındadır.
 
 ## Claude Desktop profili
 
@@ -267,7 +269,7 @@ değerini ayarlayın. Eski `Claude-3p` dizini otomatik olarak okunmaz veya
 silinmez.
 
 Anthropic harici rotalar, `p` önekli dört karakterli bir kod kullanan
-`claude-opus-4-8-p01q` gibi kararlı takma adlar alır. OpenCodex profil atamalarını
+`claude-fable-5-p01q` gibi kararlı takma adlar alır. OpenCodex profil atamalarını
 kararlı tutmak için dahili olarak sentetik tarih yuvaları saklar; ancak güncel
 Desktop sürümleri etkin oturum modellerini karşılaştırırken sondaki tarihleri
 kaldırdığı ve model değişimini engelleyebildiği için bu tarihi Desktop model kimliği olarak yayımlamaz. Mevcut
@@ -437,7 +439,7 @@ satırı için bir tane gönderir (`Routed by OpenCodex to <provider>/<model>`; 
 | Yüzey | Format | Örnek |
 | --- | --- | --- |
 | Claude Code CLI | `ocx-claude-<provider>--<model>` (düz) veya `ocx-claude2-…` (kaçışlı) | `ocx-claude-openai--gpt-5.6-sol` |
-| Claude Desktop 3P | `claude-opus-4-8-p<code>` (3 karakterli base36 profil yuvası) | `claude-opus-4-8-p01q` |
+| Claude Desktop 3P | `claude-fable-5-p<code>` (3 karakterli base36 profil yuvası) | `claude-fable-5-p01q` |
 
 Proxy, istek başına aileyi seçer: `?ids=cli` veya `?ids=desktop` kazanır; aksi
 takdirde `claude-code/*` kullanıcı aracısı okunabilir CLI biçimini alır ve diğer
@@ -513,7 +515,9 @@ kimliklerini korur.
 
 ### Bağlam değişkeni `[1m]` işaretçisi
 
-Yetkili bağlam penceresi 1M olan veya varsayılan sıkıştırma eşiği olan 829.800
+Bu kontroller, [özel sağlayıcı tahmini](/tr/reference/configuration/providers/#özel-sağlayıcılarda-bağlam-penceresi) içerebilen etkin katalog penceresini kullanır. Tahmin, aracının gerçek kapasitesini doğrulamaz.
+
+Etkin katalog bağlam penceresi 1M olan veya varsayılan sıkıştırma eşiği olan 829.800
 tokene ulaşan modeller fazladan bir `…[1m]` seçici satırı alır. Bu taban sabittir:
 sıkıştırma değerini değiştirmek onu düşürmez ve Anthropic rotasındaki Claude
 modellerinin gerçekten 1M olması gerekir. Otomatik bağlam kapatılırsa satır yalnızca
@@ -526,7 +530,7 @@ sonekini kaldırır.
 Claude Code, tanımadığı herhangi bir model için 200k token hesabı yapar.
 **Otomatik bağlam** (varsayılan olarak açık) bunu düzeltir:
 
-1. Başlatma ortam yuvaları, gerçek pencere 200k'nın üzerinde **ve** en az yapılandırılmış
+1. Başlatma ortam yuvaları, etkin katalog penceresi 200k'nın üzerinde **ve** en az yapılandırılmış
    otomatik sıkıştırma eşiğindeyken `[1m]` işaretçisini alır. Keşif ve Desktop seçici
    satırları bu eşiği izlemez: sabit 829.800 token tabanını kullanırlar (Anthropic
    rotasındaki Claude modelleri için gerçek 1M).
@@ -544,6 +548,10 @@ Claude Code, tanımadığı herhangi bir model için 200k token hesabı yapar.
 Sıkıştırma değeri Claude sayfasında ayarlanabilir. **Uyarı:** bir modelin gerçek
 penceresinin üzerine çıkarmak o modeli bozar — sohbet özetleme tetiklenmeden
 önce hata verir.
+
+Bağlam taşması hataları normalleştirilirken sağlayıcının hata mesajının yalnızca ilk 65.536 UTF-16 kod birimi kullanılır.
+Bu sınırdan sonraki tanılama ayrıntıları veya token sayıları, kesilme işareti eklenmeden kaybolabilir.
+Kesin sınırlar ve token sayılarının aktarılma koşulları için [İngilizce kılavuza](/guides/claude-code/#auto-context-big-context-models-without-the-200k-ceiling) bakın.
 
 1M altı yerel Anthropic modelleri hiçbir zaman otomatik olarak işaretlenmez.
 Kendi dışa aktardığınız sıkıştırma penceresi, başlatma yuvası işaretlemesinde her zaman kazanır (proxy hangi modellerin
@@ -728,7 +736,7 @@ dönüştürür:
 | Asistan `tool_use` | `function_call` (`input` → JSON dizgeleştirilmiş `arguments`) |
 | Kullanıcı `tool_result` | `function_call_output` (`is_error` → `[tool error]` öneki) |
 | `thinking` / `redacted_thinking` tekrarı | İmzaları ve gizli yükleri sınırlı `ocxr1` zarflarında taşıyan `reasoning` öğeleri |
-| Fonksiyon araçları | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
+| Fonksiyon araçları | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) `allowed_domains`, `blocked_domains` veya `user_location` içeren barındırılan arama, çevrilmiş Responses/Chat rotalarından çıkarılır; çıkarılan aramayı zorlamak 400 döndürür. Geçerli `defer_loading` işlev tanımları normal işlevler olarak çağrılabilir. [Çeviri sınırlarına](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes) bakın. |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, adlandırılmış fonksiyon→`{type:"function",name}`, barındırılan WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -857,7 +865,7 @@ veya `ocx claude` komutunu yeniden çalıştırın.
 
 **Büyük modele rağmen 200k bağlam tavanı** — Seçicide `[1m]` varyantını seçin
 veya otomatik bağlamı etkinleştirin (varsayılan olarak açık). Seçici hiçbir
-`[1m]` satırı göstermiyorsa, modelin yetkili bağlam penceresi sabit 829.800
+`[1m]` satırı göstermiyorsa, modelin etkin katalog bağlam penceresi sabit 829.800
 token tabanının altında olabilir.
 
 **Yetenek yüklemelerinden kaynaklanan yüksek token sayısı** — Paketlenmiş
@@ -885,7 +893,7 @@ The Subagents page offers **Force all subagents onto one model**, off by default
 
 `ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
 
-This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` when the authoritative window reaches the fixed 829,800-token floor, and only for a genuine 1M window on Anthropic Claude models and bare `claude-*` selectors; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` when the effective catalog window reaches the fixed 829,800-token floor, and only for a genuine 1M window on Anthropic Claude models and bare `claude-*` selectors; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
 
 Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
 

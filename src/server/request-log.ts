@@ -19,6 +19,7 @@ import {
 } from "../lib/errors";
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import type { CodexAffinityMove, CodexAffinityReason } from "../codex/routing";
+import type { CodexAuthContext } from "../codex/auth-context";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxProviderConfig, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
@@ -46,6 +47,7 @@ import {
   normalizeClaudeCompatibilityUsageLog,
   normalizeRequestFailureAttribution,
   normalizeRequestSpend,
+  normalizedAttempts,
   readRecentUsageEntries,
   modelIdentityLogFields, recordObservedServedModel,
   usageForFinalLog,
@@ -96,12 +98,19 @@ import type {
 
 const CACHE_DIAGNOSTIC_HOOK = Symbol.for("opencodex.cache-diagnostic.v1");
 interface CacheDiagnosticHooks {
+  /** Whether inbound bodies are actually recorded; the hook is registered at import either way. */
+  enabled(): boolean;
   observeInbound(body: unknown, headers: Headers, source: PromptCacheKeySource): CacheDiagnosticDraft;
   rebind(body: unknown, draft: CacheDiagnosticDraft | undefined): void;
   finalize(facts: CacheDiagnosticFinalFacts): void;
 }
 function cacheDiagnosticHooks(): CacheDiagnosticHooks | undefined {
   return (globalThis as Record<symbol, CacheDiagnosticHooks | undefined>)[CACHE_DIAGNOSTIC_HOOK];
+}
+
+/** Whether the cache diagnostic recorder will record inbound bodies (`OPENCODEX_CACHE_DEBUG=1`). */
+export function cacheDiagnosticsObserving(): boolean {
+  return cacheDiagnosticHooks()?.enabled() === true;
 }
 
 export interface RequestLogContext extends UpstreamErrorDiagnostics {
@@ -143,6 +152,8 @@ export interface RequestLogContext extends UpstreamErrorDiagnostics {
   lastOutputAt?: number;
   /** Best-effort chat/session correlation for Logs grouping (#330). Opaque; omit when unknown. */
   conversationId?: string;
+  /** In-memory only: conversationId holds the log-only Hermes digest, which a native id replaces. */
+  conversationIdIsHermesFallback?: boolean;
   surface?: "claude" | "claude-desktop" | "grok";
   /** The matched configured key's id. Set ONLY for admissionKind "configured" —
    *  never a sentinel, so a hand-edited entry whose id happens to be "loopback"
@@ -348,6 +359,8 @@ export interface RequestLogEntry extends UpstreamErrorDiagnostics {
   usage?: OcxUsage;
   totalTokens?: number;
   attempts?: PersistedUsageAttempt[];
+  /** True when persistence normalization drops any attempt. */
+  attemptNormalizationDropped?: boolean;
   /**
    * Upstream spend for the whole logical request: sends aggregated across attempts and combo
    * children, split into settled and unresolved, with the budget state and move reasons that
@@ -504,6 +517,8 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.usage ? { usage: entry.usage } : {}),
     ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
     ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+    ...(entry.attemptNormalizationDropped === true
+      ? { attemptNormalizationDropped: true } : {}),
     ...(spend ? { spend } : {}),
     ...(isKnownCacheTelemetryProvenance(entry.cacheProvenance)
       ? { cacheProvenance: entry.cacheProvenance }
@@ -610,12 +625,16 @@ export function addRequestLog(entry: RequestLogEntry) {
   const servedModel = modelIdentityLogFields(entry).servedModel;
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
   const jevDecision = normalizePersistedJevDecision(entry.jevDecision);
+  const attempts = normalizedAttempts(entry.attempts);
+  const attemptsDropped = Array.isArray(entry.attempts) && attempts.length < entry.attempts.length;
   const retained: RequestLogEntry = shadowCallRewrittenFrom === entry.shadowCallRewrittenFrom
     && servedModel === entry.servedModel
     && entry.claudeCompatibility === undefined
     && entry.jevDecision === undefined
+    && !attemptsDropped
     ? entry
-    : { ...entry, ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}) };
+    : { ...entry, ...(entry.attemptNormalizationDropped === true || attemptsDropped ? { attemptNormalizationDropped: true } : {}),
+      ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}) };
   if (!shadowCallRewrittenFrom && retained !== entry) delete retained.shadowCallRewrittenFrom;
   if (!servedModel && retained !== entry) {
     delete retained.servedModel;
@@ -690,6 +709,8 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.usage ? { usage: entry.usage } : {}),
       ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
       ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+    ...(entry.attemptNormalizationDropped === true
+      ? { attemptNormalizationDropped: true } : {}),
       ...(entry.spend ? { spend: entry.spend } : {}),
       ...(isKnownCacheTelemetryProvenance(entry.cacheProvenance)
         ? { cacheProvenance: entry.cacheProvenance }
@@ -975,7 +996,7 @@ export function usageFromResponsesPayload(usage: unknown): OcxUsage | undefined 
   const raw = usage as {
     input_tokens?: unknown;
     output_tokens?: unknown;
-    input_tokens_details?: { cached_tokens?: unknown; cache_write_tokens?: unknown };
+    input_tokens_details?: { cached_tokens?: unknown; cache_write_tokens?: unknown; cache_write_1h_tokens?: unknown };
     output_tokens_details?: { reasoning_tokens?: unknown };
     total_tokens?: unknown;
     prompt_tokens?: unknown;
@@ -996,6 +1017,9 @@ export function usageFromResponsesPayload(usage: unknown): OcxUsage | undefined 
         : {}),
       ...(typeof raw.input_tokens_details?.cache_write_tokens === "number"
         ? { cacheCreationInputTokens: raw.input_tokens_details.cache_write_tokens }
+        : {}),
+      ...(typeof raw.input_tokens_details?.cache_write_1h_tokens === "number"
+        ? { cacheCreation1hInputTokens: raw.input_tokens_details.cache_write_1h_tokens }
         : {}),
       ...(typeof raw.output_tokens_details?.reasoning_tokens === "number"
         ? { reasoningOutputTokens: raw.output_tokens_details.reasoning_tokens }
@@ -1252,6 +1276,18 @@ export function noteAffinityMove(
 }
 
 /**
+ * Copy the selection's own affinity decision onto the request log. Both Pool-served kinds carry
+ * one: a stored Pool account and the main login rotating as `main-pool` (#4546, #7799). A move
+ * then reads as an event with its cause instead of something inferred from account labels.
+ */
+export function noteCodexSelectionAffinity(logCtx: RequestLogContext, authCtx: CodexAuthContext): void {
+  const decision = authCtx.kind === "pool" || authCtx.kind === "main-pool" ? authCtx.affinityDecision : undefined;
+  if (!decision) return;
+  logCtx.affinity = decision.move;
+  logCtx.affinityReason = decision.reason;
+}
+
+/**
  * The affinity scope a released binding belonged to: one thread, one model lane.
  *
  * Both halves are part of the key. A thread holds a separate binding per model lane, so a
@@ -1426,7 +1462,12 @@ export function addFinalRequestLog(
     ...(attempt.deliverySummary ? { deliverySummary: { ...attempt.deliverySummary } } : {}),
   }));
   const isCombo = logCtx.comboId !== undefined && (attempts?.length ?? 0) > 0;
-  const aggregate = isCombo ? aggregateAttemptUsage(attempts ?? []) : null;
+  // A key or account rotation splits the attempt and clears `logCtx.usage`, so a multi-attempt
+  // request totals from its attempts, combo or not. One attempt keeps the request-level usage
+  // (and its input estimate); a locally answered row sent nothing and keeps its own.
+  const aggregate = isCombo || ((attempts?.length ?? 0) > 1 && logCtx.localTerminalReason === undefined)
+    ? aggregateAttemptUsage(attempts ?? [])
+    : null;
   const loggedUsage = aggregate?.usage ?? existing.usage;
   const usageStatus = aggregate?.status ?? existing.status;
   const totalTokens = aggregate?.totalTokens ?? existing.totalTokens;
@@ -1608,7 +1649,10 @@ function finalizedUsage(
   const usageFallback = !finalUsage && estimate !== undefined
     ? { inputTokens: estimate, outputTokens: 0, estimated: true }
     : undefined;
-  const combinedInputTokens = finalUsage && estimate !== undefined
+  // The estimate is a floor under a count the adapter could only guess. A count the adapter read
+  // off the upstream's own usage frame stays exact: max() against a larger local estimate would
+  // replace it and mark it estimated.
+  const combinedInputTokens = finalUsage && !finalUsage.upstreamReported && estimate !== undefined
     ? Math.max(finalUsage.inputTokens, estimate)
     : undefined;
   const loggedUsage = finalUsage && combinedInputTokens !== undefined
@@ -1705,8 +1749,10 @@ export function noteProviderAttemptSend(
   if (attempt && attempt.sendCount > 0 && attemptAccountChanged(previous, next, attempt.provider, logCtx.provider)) {
     // An input estimate is not evidence that a failed send used that many tokens.
     delete attempt.inputTokenEstimate;
+    // An account-scoped recovery kind names the status the sealed account answered.
     finishRequestAttempt(attempt, attempt.status >= 100 ? attempt.status
-      : recovery === "key-401" ? 401 : recovery?.includes("429") ? 429 : 502,
+      : recovery === "key-401" || recovery === "oauth-401" ? 401 : recovery === "oauth-account-403" ? 403
+        : recovery === "oauth-account-402" ? 402 : recovery?.includes("429") ? 429 : 502,
     Date.now() - (logCtx.activeAttemptStartedAt ?? Date.now()), attempt.usage);
     // This attempt is being sealed because a NAMED recovery rejected it, so the recovery kind
     // is direct evidence here rather than an inference from history. Without this the sealed
@@ -1835,16 +1881,20 @@ export function finishRequestAttempt(
 export function aggregateAttemptUsage(
   attempts: readonly PersistedUsageAttempt[],
 ): FinalizedUsageResult {
-  const status: UsageStatus = attempts.length > 0
-    && attempts.every(attempt => attempt.usageStatus === "unsupported")
+  // A usage-less attempt that never reached upstream spent nothing (summary.ts `spentNothing`),
+  // so it cannot leave the row's usage unknown.
+  const measured = attempts.filter(attempt => attempt.usage
+    || (attempt.sendCount !== 0 && attempt.locallyAnswered !== true));
+  const status: UsageStatus = measured.length > 0
+    && measured.every(attempt => attempt.usageStatus === "unsupported")
     ? "unsupported"
-    : attempts.some(attempt => (
+    : measured.some(attempt => (
         attempt.usageStatus === "unreported" || attempt.usageStatus === "unsupported"
       ))
       ? "unreported"
-      : attempts.some(attempt => attempt.usageStatus === "estimated")
+      : measured.some(attempt => attempt.usageStatus === "estimated")
         ? "estimated"
-        : attempts.length > 0
+        : measured.length > 0
           ? "reported"
           : "unreported";
 
@@ -1852,7 +1902,7 @@ export function aggregateAttemptUsage(
   if (usages.length === 0) return { status };
 
   const sumOptional = (
-    key: "cachedInputTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens"
+    key: "cachedInputTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens" | "cacheCreation1hInputTokens"
       | "reasoningOutputTokens" | "providerCredits",
   ): number | undefined => {
     const present = usages.flatMap(usage => (
@@ -1861,8 +1911,12 @@ export function aggregateAttemptUsage(
     return present.length > 0 ? present.reduce((sum, value) => sum + value, 0) : undefined;
   };
   const cachedInputTokens = sumOptional("cachedInputTokens");
-  const cacheReadInputTokens = sumOptional("cacheReadInputTokens");
+  // Readers take `cacheReadInputTokens ?? cachedInputTokens` (usage/cost.ts), so once any attempt
+  // reports the read field, an attempt that only reports `cachedInputTokens` must count in it too.
+  const cacheReadInputTokens = sumOptional("cacheReadInputTokens") === undefined ? undefined
+    : usages.reduce((sum, usage) => sum + (usage.cacheReadInputTokens ?? usage.cachedInputTokens ?? 0), 0);
   const cacheCreationInputTokens = sumOptional("cacheCreationInputTokens");
+  const cacheCreation1hInputTokens = sumOptional("cacheCreation1hInputTokens");
   const reasoningOutputTokens = sumOptional("reasoningOutputTokens");
   const providerCredits = sumOptional("providerCredits");
   const totalTokens = usages.reduce(
@@ -1876,9 +1930,11 @@ export function aggregateAttemptUsage(
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+    ...(cacheCreation1hInputTokens !== undefined ? { cacheCreation1hInputTokens } : {}),
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
     ...(providerCredits !== undefined ? { providerCredits } : {}),
     ...(status === "estimated" ? { estimated: true } : {}),
+    ...(usages.every(usage => usage.upstreamReported) ? { upstreamReported: true as const } : {}),
   };
   return { usage: aggregate, status, totalTokens };
 }

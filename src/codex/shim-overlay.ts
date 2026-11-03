@@ -5,6 +5,10 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getConfigDir } from "../config";
+import {
+  beginCodexCliSelectionParentWrite,
+  CodexCliSelectionMutationBusyError,
+} from "./cli-update-selection-gate";
 import { durableBunRuntime } from "../lib/bun-runtime";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { truncateRetainedUtf8 } from "../lib/admission";
@@ -43,6 +47,10 @@ export function overlayActivationHint(configDir = getConfigDir()): string {
 }
 function sameId(left: OverlayIdentity | null | undefined, right: OverlayIdentity | null | undefined): boolean {
   return !!left && !!right && left.dev === right.dev && left.ino === right.ino;
+}
+/** APFS device numbers can change after reboot; persisted ownership still requires the same inode. */
+function samePersistedInode(current: OverlayIdentity, recorded: OverlayIdentity | undefined): boolean {
+  return !!recorded && current.ino === recorded.ino;
 }
 function lexical(path: string): Stats | null {
   try { return lstatSync(path); }
@@ -128,7 +136,7 @@ function shellEnvironment(): string {
     'unset ocx_shim_dir ocx_shim_rest ocx_shim_path ocx_shim_more ocx_shim_part', ""].join("\n");
 }
 function ownedWrapper(value: Snapshot, state: OverlayState): boolean {
-  return sameId(value.identity, state.wrapperIdentity)
+  return samePersistedInode(value.identity, state.wrapperIdentity)
     && value.content.includes(SHIM_MARKER) && value.content.includes(`exec ${shQuote(state.launcherPath)} "$@"`);
 }
 function requireOverlayIdentities(state: OverlayState): void {
@@ -137,7 +145,7 @@ function requireOverlayIdentities(state: OverlayState): void {
   }
 }
 function ownedEnvironment(value: Snapshot, state: OverlayState): boolean {
-  return sameId(value.identity, state.envIdentity) && value.content === shellEnvironment();
+  return samePersistedInode(value.identity, state.envIdentity) && value.content === shellEnvironment();
 }
 function revalidateOverlay(state: OverlayState, saved: Snapshot | null, wrapper: Snapshot | null, env: Snapshot | null): void {
   if (!unchanged(statePath(), saved) || !unchanged(state.wrapperPath, wrapper) || !unchanged(overlayPaths().env, env)) {
@@ -201,6 +209,7 @@ export function overlayDiagnostic(state: ShimState): CodexShimDiagnostic {
     inspection?.revalidate();
   } catch (error) { active = null; runnable = false; integrityMessage = failure(error).message; }
   return { installed: true, healthy: complete && runnable && active === true, runnable, active,
+    activationPending: complete && runnable && active !== true,
     summary: `Codex PATH shim: ${complete && runnable ? "ready" : "unhealthy"} at ${state.wrapperPath}; launcher ${state.launcherPath}; PATH ${active === null ? "unverified" : active ? "active" : "inactive"}. ${complete && runnable ? overlayActivationHint() : integrityMessage || "Run ocx codex-shim install to repair the shim."}` };
 }
 
@@ -404,7 +413,9 @@ function failure(error: unknown): InstallResult {
   const message = error instanceof Error ? error.message : "Codex overlay operation failed";
   return { installed: false, refused: true, message: truncateRetainedUtf8(message.replace(/[\r\n]/g, " "), MAX_DIAGNOSTIC_VALUE_BYTES) };
 }
-function installLocked(discover: () => string | null, automatic: boolean, check: () => void): InstallResult {
+function installLocked(
+  discover: () => string | null, automatic: boolean, check: () => void, describeMiss?: () => string | null,
+): InstallResult {
   recoverJournal(check);
   const pinnedState = snapshot(statePath());
   const result = readStateResult();
@@ -428,20 +439,28 @@ function installLocked(discover: () => string | null, automatic: boolean, check:
     const discovered = automatic ? null : discover();
     launcher = discovered ? resolve(discovered) : null;
   }
-  if (!launcher) throw new Error("Native Codex launcher not found; install or repair Codex with its package manager");
+  // A discovery that refused a candidate (fnm's temporary multishell path) says why; reporting it
+  // as plain absence sent users to reinstall a Codex that was already there (#6963).
+  if (!launcher) throw new Error(describeMiss?.() || "Native Codex launcher not found; install or repair Codex with its package manager");
   check();
   return publishOverlay(launcher, overlay, check, pinnedState);
 }
-export function installUnixOverlay(discover: () => string | null): InstallResult {
+export function installUnixOverlay(discover: () => string | null, describeMiss?: () => string | null): InstallResult {
+  // The update worker's commit window re-observes selection evidence right up
+  // to its installer spawn; a shim install must not cross that window. Busy is
+  // surfaced before namespace creation, the restore lock and any journal
+  // mutation, so a held gate refuses without touching state.
+  const selectionWrite = beginCodexCliSelectionParentWrite();
+  if (!selectionWrite.entered) return failure(new CodexCliSelectionMutationBusyError());
   let lock: ReturnType<typeof tryAcquireShimRestoreLock> = null;
   try {
     const check = namespace(true);
     lock = tryAcquireShimRestoreLock();
     if (!lock) throw new Error("Codex shim operation is already in progress; retry later");
     check();
-    return installLocked(discover, false, check);
+    return installLocked(discover, false, check, describeMiss);
   } catch (error) { return failure(error); }
-  finally { lock?.release(); }
+  finally { selectionWrite.exit(); lock?.release(); }
 }
 export function autoRestoreUnixOverlay(options: RestoreOptions): CodexShimAutoRestoreResult {
   const result = readStateResult();
@@ -459,6 +478,11 @@ export function autoRestoreUnixOverlay(options: RestoreOptions): CodexShimAutoRe
   } catch (error) { return { status: "ineligible", message: failure(error).message }; }
   if (!nativeProbe(state.launcherPath)) return { status: "ineligible", message: "Recorded native Codex launcher is unusable; repair it with its package manager" };
   if (!options.enabled()) return { status: "disabled" };
+  // Same selection gate as install: acquired before namespace creation, the
+  // restore lock and journal mutation; a held update commit window defers the
+  // restore rather than racing it.
+  const selectionWrite = beginCodexCliSelectionParentWrite();
+  if (!selectionWrite.entered) return { status: "deferred", message: "a Codex CLI update is committing an install; shim restore deferred" };
   let lock: ReturnType<typeof tryAcquireShimRestoreLock> = null;
   try {
     const check = namespace(true);
@@ -475,9 +499,13 @@ export function autoRestoreUnixOverlay(options: RestoreOptions): CodexShimAutoRe
     const installed = installLocked(() => null, true, check);
     return installed.installed ? { status: "restored", message: installed.message } : { status: "healthy" };
   } catch (error) { return { status: "deferred", message: failure(error).message }; }
-  finally { lock?.release(); }
+  finally { selectionWrite.exit(); lock?.release(); }
 }
 export function uninstallUnixCodexShim(): { removed: boolean; message: string } {
+  // Same selection gate: removal mutates the same state the update worker
+  // re-observes in its commit window, so a held gate reports busy unchanged.
+  const selectionWrite = beginCodexCliSelectionParentWrite();
+  if (!selectionWrite.entered) return { removed: false, message: new CodexCliSelectionMutationBusyError().message };
   let lock: ReturnType<typeof tryAcquireShimRestoreLock> = null;
   try {
     const check = namespace(false);
@@ -513,5 +541,5 @@ export function uninstallUnixCodexShim(): { removed: boolean; message: string } 
     if (!removePinned(statePath(), stateFile)) throw new Error("Concurrent Codex state replacement preserved");
     return { removed: true, message: "Codex PATH shim removed. Native Codex launcher was preserved. Remove the codex-shell-env source line from your shell startup file." };
   } catch (error) { return { removed: false, message: failure(error).message }; }
-  finally { lock?.release(); }
+  finally { selectionWrite.exit(); lock?.release(); }
 }

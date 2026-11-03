@@ -7,8 +7,8 @@ Catalog HTTP acquisition follows the [proxy-routing contract](catalog.md#remote-
 A lock in the Codex credential store is governed by [descriptor identity and age](catalog.md#accounts-namespaces-and-pool-rotation), so the mere presence of its filename is neither acquisition nor release authority. Failed path-identity probes leave the lock for stale recovery and preserve the refresh callback outcome. Cooperating lock metadata changes serialize through the existing SQLite mutation transaction; release keeps the descriptor open through identity comparison and any unlink, then closes it. Failed metadata writes remove only a matching owned path after successful coordination; unknown identity, failed probes or unavailable coordination retain the path for stale recovery. Async refresh work holds no metadata transaction.
 
 CLI installation inspection reason codes, including Windows deferral, follow the [runtime inspection contract](runtime.md#lifecycle).
-
-Explicit Codex CLI installation observation does not discover a Codex home or read/write its state. See the [read-only observation contract](runtime.md#explicit-codex-cli-installation-observation).
+Launcher credentials require a parsed managed provider transport matching the installation's loopback target or persisted local client connection; provider names and injection comments are not destination authority. Default profiles, project layers and destination-changing arguments suppress automatic token loading.
+The read-only CLI update plan follows the [isolated environment and process-observation contract](codex-cli-update.md).
 
 ## Orca source-owned account import
 
@@ -43,8 +43,9 @@ user off a Windows home they were running against, and a stat failure other than
 local home rather than switching to a different one. Codex runtime discovery (src/codex/runtime.ts) also reads this home on Linux: after an explicit runtime, PATH, and the ordinary install locations, it enumerates the direct children of <effective CODEX_HOME>/bin/wsl/<version-hash>/codex newest first, probes each through the isolated --version seam, and re-enumerates on every resolve so a Desktop update that replaces the hash directory is picked up (issue 5635). An explicitly
 set path that is unreadable or not a directory is an error, not a fallback: silently using a
 different home than the operator named would write provider state where nobody is looking for it. A proven missing home (including explicit `CODEX_HOME`) resolves lexically; native restore, remove and journal reconcile succeed without creating a directory or acquiring the config write lock. Dangling links do not prove absence, and existing homes retain ownership checks. Lock-path resolution never creates parents; unresolved parents yield a typed, handled refusal. Scalar and multi-agent feature edits refuse missing homes; prompt commits and native feature commands retain their directory creation before locking. The management native feature toggle resolves and retains the spawn invocation before preparing a home; unavailable executables return the toggle failure without creating it. Failed native toggles and prompt commits keep a home they created (`src/codex/prepared-home.ts`): a pathname-based removal cannot prove it still names that directory, and an empty home is what Codex itself creates. A fresh install can have that directory but no `config.toml` yet; applying the integration then creates an empty `config.toml` there (never overwriting an existing file) and continues, while a missing home directory is refused with instructions to start Codex once or set `CODEX_HOME` (issue 5422).
+On macOS, `src/codex/runtime.ts` tries the system then user ChatGPT.app bundle after environment, persisted selection, shim, PATH, established installs and a runnable bare fallback, preferring `Contents/Resources/codex-cli/bin/codex` over `Contents/Resources/codex`. Bundle membership compares the normalized and canonical (symlink-resolved) forms of the path and bundle with a segment boundary, including backing executables; candidate ordering keys on the generated app commands, so an established install path that links into the app keeps its precedence. Discovery and probe prechecks require exactly one top-level `CFBundleIdentifier` equal to `com.openai.codex` in a regular XML `Contents/Info.plist`, read in-process with a 64 KiB limit; the whole document must be valid plist XML, so binary, malformed (anywhere, not only in the identity pair), oversized or unavailable metadata fails closed. App candidates never supersede a runnable persisted selection, including legacy/discovered records and the fast path, but full discovery can report them in `newerAvailable`; invalid selections retain `replacedConfigured` recovery. When a verified app candidate exists, deferred discovery skips the bare fallback as a candidate and retains it only as the no-candidate sentinel.
 `src/codex/home.ts` imports path expansion directly from `src/config/paths.ts`, so a fresh WSL process can resolve its Codex home without re-entering the config facade before the resolver initializes.
-The managed files are:
+Provider-ID approvals are home-bound; see the [custom routing contract](codex-provider-routing.md). The managed files are:
 
 ```text
 $CODEX_HOME/config.toml
@@ -56,7 +57,7 @@ $CODEX_HOME/.opencodex-native-main-profiles/
 ```
 
 Never assume macOS-only paths. Windows, service installs, and app-launched Codex can all depend on
-the resolved `CODEX_HOME`.
+the resolved `CODEX_HOME`. For credential delivery, `src/cli/codex-launch-auth.ts` excludes an ancestor `.codex/config.toml` only when its realpath matches the home config and its lexical alias, ancestors and intermediate link targets pass ownership/ACL inspection. A protected symlinked user `.codex` qualifies; distinct files, replaceable aliases and failed inspections withhold the token as a project layer. Namespace ownership follows the [launcher contract](cli-management.md#head-and-help-navigation).
 
 Log Guard reclaim in `src/codex/log-guard/maintenance.ts` refuses a non-regular or redirected
 database path. It compares canonical path and full-width filesystem device and file identity
@@ -78,7 +79,13 @@ and absence is distinct from an empty file. The injector checks a retained hashl
 the same `baselineContent` it snapshots, plus the current profile, before writing or assigning a new
 injected hash. Native content can establish a fresh snapshot; routed content cannot promote an
 unverified older original. Existing hash-backed edit preservation and external-provider opt-out
-remain separate paths.
+remain separate paths. Removal with `preserveProfile: false` refuses a final-component profile symlink before changing config or journal state. Profile cleanup uses the held configuration lock, canonical parent and identity rechecks; its pathname unlink is not atomic against non-cooperating writers. A matching journal refuses profiles eligible for restoration or removal when they are symlinks, including dangling generated links, before changing either artifact or recovery evidence. Config publication is covered by `withConfigWriteRecovery` if later profile removal throws.
+
+Standalone removal derives its transform and rollback preimage from the same raw bytes.
+Removal refuses before publication if the recovery capture no longer matches its input bytes.
+Nested removal also requires the outer scope's last observed file identity to remain current;
+its transaction preimage is retained. Advisory locking does not serialize non-cooperating edits
+after these checks.
 
 `src/codex/journal.ts` distinguishes restored state from actual writes with `configRewritten`
 and `profileRewritten`; removing a generated profile counts as a write, while already-original
@@ -135,7 +142,7 @@ to SQLite ownership; the tolerant root-string helper used by injection and catal
 
 > Decision record: [ADR-0007](decisions/ADR-0007-codex-home.md)
 
-Native-main profile ownership is bound to the real `CODEX_HOME`, not to an OpenCodex instance.
+Native-main profile ownership is bound to the real `CODEX_HOME`, not to an OpenCodex instance. Native profile switches transact only auth state; they do not write or journal `installation_id`. [Pool wire identity](providers/codex-installation-identity.md) lives in the OpenCodex home.
 Its encrypted vault, transaction journal, recovery marker, and referenced quarantine files live in
 the owner-only `.opencodex-native-main-profiles` directory. The unchanged
 `.opencodex-native-profile.lock.sqlite` beside that directory serializes every process sharing the
@@ -166,7 +173,7 @@ A sibling instance is `ocx start --port <other>` while a live proxy serves the c
 lease only with its own `OPENCODEX_HOME`, and still shares this Codex home, `~/.claude`, `~/.grok` and
 the launchd domain with the live owner. `handleStart` marks the process through
 `src/codex/sibling-start.ts` before the server binds, and the mark is one-way for the process's
-lifetime. The cross-home check follows same-home discovery and precedes journal reconciliation. It reads the default home's protected runtime record plus every home nominated by the shared owner registry, plus managed Grok and Codex loopback URLs as location hints. The registry (~/.opencodex/ocx-homes/<hash>.json, home path only, written beside runtime-port.json publication; OCX_OWNER_REGISTRY_DIR overrides the anchor for tests only) is the locator that lets one custom home find another; it lives in OpenCodex's own namespace, never inside a protected client home, and pointers whose home no longer publishes a record are pruned before the reader's entry cap while a truncated listing fails closed as indeterminate. It accepts a different process only when the listener's PID matches a record and a fresh `/healthz` challenge proves possession of its attestation secret; an unauthenticated listener at a stale managed destination is not an owner, and a sole custom-home start still syncs. When a managed destination answers but ownership cannot be decided - a live listener no registered record names, a legacy record without an attestation secret, or an unreadable transport - the verdict is indeterminate and the start still takes the sibling mark, so a competing owner never rewrites shared clients on unverifiable evidence. The mark closes `localClientSyncAllowed` in `src/codex/desired-state.ts` with its own skip reason
+lifetime. The cross-home check follows same-home discovery and precedes journal reconciliation. It reads the default home's protected runtime record plus every home nominated by the shared owner registry, plus managed Grok and Codex loopback URLs as location hints. The registry (~/.opencodex/ocx-homes/<hash>.json, home path only, written beside runtime-port.json publication; OCX_OWNER_REGISTRY_DIR overrides the anchor for tests only) is the locator that lets one custom home find another; it lives in OpenCodex's own namespace, never inside a protected client home, and pointers whose home no longer publishes a record are pruned before the reader's entry cap while a truncated listing fails closed as indeterminate. It accepts a different process only when the listener's PID matches a record and a fresh `/healthz` challenge proves possession of its attestation secret; an unauthenticated listener at a stale managed destination is not an owner, and a sole custom-home start still syncs. When a managed destination answers but ownership cannot be decided - a live listener no registered record names, a legacy record without an attestation secret, or an unreadable transport - the verdict is indeterminate and a new start refuses before binding, runtime publication or shared-client writes. A later start retries discovery from scratch; a transient timeout never becomes a permanent sibling mark. An already-running home keeps its recorded sibling relationship during owner downtime. The mark closes `localClientSyncAllowed` in `src/codex/desired-state.ts` with its own skip reason
 `sibling`, so startup sync, cache invalidation, Grok, the retained catalog writers and the native-main
 lifecycle stand down (the sibling runs the no-op lifecycle, so it never contends for the owner lease;
 its data-plane `auth.json` refresh still runs under the machine-wide exclusive claim). Owner-level
@@ -189,7 +196,7 @@ prior sibling runtime and `OPENCODEX_HOME`. Connected-client recycle issues it b
 the listener or removing that runtime record. `handleStart` consumes the record before any probe;
 a forged port env or replay grants no sibling status. A valid replacement stays a sibling while
 the owner is down, and its journal recovery remains skipped.
-Every other detached `ocx start` (`ocx ensure`, the tray, the `ocx claude`/`opencode`/`minimax`
+Every other detached `ocx start` (`ocx ensure`, the tray, the `ocx claude`/`codex`/`opencode`/`minimax`
 auto-start and the updater's restart) starts an ordinary owner and strips an inherited marker
 through `withoutSiblingMarker`.
 
@@ -290,10 +297,10 @@ restore still fails closed when a recorded logical entry has no surviving file.
 
 OpenCodex config writers share `config.toml.ocx-write.lock`: feature scalar and CLI-toggle
 batches, injection, journal replay, removal, and restore/compensation read and write while
-holding it. Injection and coordinated restore take config before SQLite N; prompt writes
+holding it. Parent stop adds [connection validation under C](runtime.md#remote-hub-hardening-ownership). Injection and coordinated restore take config before SQLite N; prompt writes
 take prompt-store before config. Nested writers receive an explicit live handle for the
 same canonical config destination; implicit nesting refuses fast. Symlink aliases contend
-on the real destination's lock. Each publication revalidates canonical identity and inode immediately before rename,
+on the real destination's lock. Acquisition revalidates the canonical path and captures the inode after the lock is held, admitting a preceding writer's completed atomic replacement while refusing a canonical retarget before entering the section. Each publication revalidates canonical identity and inode immediately before rename,
 including each Windows retry; the confirmed publication hook advances that witness. Async acquisition uses a monotonic
 deadline, defaults to two seconds, and accepts only integer timeouts from zero to ten
 seconds. Zero permits one immediate attempt.
@@ -314,11 +321,19 @@ retry. A changed canonical target refuses recovery, preserves existing journal e
 retains a private preimage file beside the canonical config with its location in the diagnostic.
 Drift is non-retryable and stops further parent publication or alias-based compensation; a
 successful child replacement advances the inode witness before subsequent parent writes.
+Prompt journal recovery uses the same prompt-store then config order as a normal
+prompt commit. A busy config lock preserves config/store/journal bytes; explicit
+retry after release replays only the recorded images, including a missing custom
+config parent. Both leases release on refusal or completion.
 
 `src/codex/prompt-lock-claim.ts` reserves the acquisition/takeover interval with a unique
 PID/token file and bakery ticket. A contender still choosing makes peers refuse, and a
 later contender sees an earlier published ticket. Dead reservations are removed by their
 unique filename; stale observation cannot rename a live successor's reusable lock path.
+A peer's cleanup removes the empty claims directory, so a claims directory that vanishes between a
+contender's `mkdir` and its read is contention (`locked`), never an unsafe namespace or a crash.
+That single read is both the ownership/type check and the parent witness, so a replacement that
+appears after a missing read is never trusted.
 Lock and claim records include host evidence and optional process-start evidence. Takeover requires a
 matching local host and two dead-PID observations; a reused PID with a different known start identity
 remains busy. Unknown start identity disables only that comparison: live or unknown PID liveness
@@ -340,7 +355,8 @@ evidence, with a one-second command timeout; Windows retains trusted PowerShell 
 Choosing evidence is published atomically before the bakery scan.
 Lock filesystem operations reuse `src/lib/windows-atomic-replace.ts`: Windows EPERM, EBUSY and EACCES retry after 25ms and 50ms; exhaustion returns busy. Unreadable evidence or a contended exclusive open followed by EEXIST never authorizes takeover.
 `src/codex/prompt-lock-evidence.ts` shares the claim and reusable-lock guards. Every destructive attempt revalidates captured parent/entry dev/ino and exact evidence bytes; replacements and parent retargets survive retry sleeps. Stale quarantine rename binds the dead-owner observation to those bytes and identity; cleanup deletes only the moved entry, on both acquisition and failure paths. Exclusive creation also revalidates the captured parent on every attempt. Completed local reservations whose cleanup exhausts are tracked by path/token and retried before acquisition, without reclaiming active live-self reservations. Release binds the matching token to the captured file identity, contents and parent before every unlink attempt; protected writer errors propagate.
-`tests/codex-integration/codex-prompt-lock-sharing.test.ts` covers sharing violations.
+The default stat provider retains device, inode and UID evidence as bigints, so distinct 64-bit file IDs remain distinct across retry fences. POSIX ownership still compares the exact UID to the current user; injected numeric stat providers remain supported.
+`tests/codex-integration/codex-prompt-lock-sharing.test.ts` covers sharing violations and distinct 64-bit file IDs that collide when converted to numbers.
 The last reservation removes its directory only with atomic empty-directory rmdir.
 Unsafe acquisition is non-retryable and carries the lock-path diagnostic through writer results.
 Automatic recovery is a no-op when the Codex home is proven absent and creates nothing.
@@ -361,7 +377,7 @@ separate role. It is not a kernel lock, a cross-host lock, or protection against
 writer between byte verification and rename. A rolling mix of old writers that do not
 reserve takeover has the same cooperation limit.
 
-Windows secret-file hardening resolves the effective token SID through an absolute, trusted
+Effective-user roots use `src/codex/windows-local-appdata.ts` ([known-folder contract](ops/test-sandbox-cleanup.md#windows-runtime-namespace)). Windows secret-file hardening resolves the effective token SID through an absolute, trusted
 PowerShell path before granting the owner and removing inherited broad ACL entries. The normal
 path obtains System32 from `GetSystemDirectoryW`. Windows ARM64 Bun builds that cannot execute
 `bun:ffi` use a narrower ACL-only fallback to the fixed protected default installation path
@@ -429,7 +445,7 @@ queue or be misreported as evictable memory. One caller-owned retry is allowed a
 `ETIMEDOUT`; the first timeout does not install a `spill-failed` tombstone. Required ACL failures
 remain fail-closed after that bounded recovery. Optional config-directory hardening uses a separate
 per-directory async single-flight, while required config mutation writers retain their existing
-awaited or synchronous fail-closed boundary.
+awaited or synchronous fail-closed boundary. Snapshot persistence serializes the entire background pass, including its follow-up timer decision. Shutdown awaits that gate before consuming a pending pass; a stable bounded rewrite cancels the mutation timer whose bytes it incorporated. `tests/responses/responses-state-flush-race.test.ts` covers overlap with a background rewrite and leaves no redundant persistence timer after flush.
 
 Each ordinary async spill write attempt owns one 30-second ACL budget shared across directory, temp,
 and exclusive-copy destination hardening; the single timeout retry receives one fresh whole-attempt
@@ -490,7 +506,7 @@ These checks coordinate cooperating processes running as the same OS user. They 
 
 ## Catalog write audit
 
-Catalog and cache writes and admission refusals leave bounded diagnostic records through `src/codex/catalog/write-audit.ts`. The catalog serialization owner coordinates every append and compaction under K; denied writers never receive a publication permit. Identical bytes produce no event. Audit failure preserves the catalog operation's outcome.
+Catalog and cache writes and admission refusals leave bounded diagnostic records through `src/codex/catalog/write-audit.ts`. The catalog serialization owner coordinates every append and compaction under K; denied writers never receive a publication permit. Identical bytes produce no event. Audit failure preserves the catalog operation's outcome. The tail reader decodes each LF-complete byte view with a fatal UTF-8 decoder before JSON parsing, without re-encoding a second buffer; leading BOMs remain visible to JSON parsing and are rejected. Owner compaction omits malformed or unterminated records, while foreign append refuses an unclean tail without mutation.
 
 Records contain fixed categories, time and process identifiers, redacted bounded home identity, routed counts and config provenance. They contain no model/provider names or raw command arguments. Each event is at most 2 KiB; retention keeps complete newest records within both 256 KiB and 400 records. Reads are bounded to the tail. On POSIX, owner creation is private and regular-file-only; a foreign writer can append only to an existing valid file within capacity, without creating or compacting it. Windows owner creation uses an exclusive blank file and required NTFS ACL hardening with a one-second deadline before diagnostic bytes, checking descriptor/path identity before and after hardening and refreshing metadata after legitimate ACL changes. ACL failure or timeout leaves the new file blank and skips the diagnostic. Existing Windows files are skipped by owner and foreign callers without ACL mutation because no read-only NTFS privacy verifier exists; mode 0600 does not establish NTFS privacy. Consequently Windows records at most the first event in a newly created audit file: subsequent events are skipped in the same process and after restart. This fallback does not provide a complete Windows audit stream; a failed initial harden leaves a blank residual and later events remain skipped.
 
@@ -500,9 +516,9 @@ The audit artifact is `opencodex-catalog-audit.jsonl` under the Codex home. New 
 
 `src/codex/catalog-self-heal.ts` is preloaded without timers before the owner's startup sync. `src/cli/claude-agent-startup-sync.ts` forwards the sync readiness verdict and starts observation synchronously on successful settlement, before deferred Claude roster or Desktop registry awaits. Successful no-op and OFF syncs establish observation; OFF remains gated until enabled, and failed sync never adopts a baseline. Observation stops before teardown. Its unreferenced 30-second timer observes the selected catalog's file identity and parses bounded regular-file content only after a change. Importing admission or catalog writers starts no timer.
 
-A lost routed namespace is repaired through ordinary management convergence only while its provider remains enabled and the owner is idle: no sibling, shutdown/recycle, connected client or client-owned journal; integration remains enabled, runtime ownership is current, and the Codex-home binding permits this writer. A synchronous precommit guard rechecks lifecycle, path and ownership inside K→C after gathering. Observation reuse, target changes, publication/release, precommit/postcommit and expected-target admission compare native realpaths with `samePath`; if either realpath is unavailable they use lexical `samePath`. Null selections remain unavailable. Directory symlink aliases and Windows casing refer to the same target; distinct paths and hardlinks do not. Missing/corrupt selected custom catalogs remain unavailable; healing does not select another target implicitly.
+A lost routed namespace is repaired through ordinary management convergence only while its provider remains enabled and the owner is idle: no sibling, shutdown/recycle, connected client or client-owned journal; integration remains enabled, runtime ownership is current, and the Codex-home binding permits this writer. A synchronous precommit guard rechecks lifecycle, path and ownership inside K→C after gathering. Observation reuse, target changes, publication/release, precommit/postcommit and expected-target admission use `src/codex/catalog/heal-observation.ts` with `same`, `different` and `unknown` results. Windows and singly linked macOS files retain native leaf normalization. Every platform revalidates observed links, resolved entries and parent evidence inside the shared read budget; drift or exhaustion returns unknown. Multiply linked macOS files use bigint file/parent identity and before/after metadata checks, including resolved leaf symlinks. Stable identical leaf names under one parent identify the same entry; different file identities or different parent identities identify different entries. Different leaf spellings under one parent and inode remain unknown: Bun 1.4.3's opendir and Glob both enumerate eagerly, so this comparator performs no directory listing and does not pretend to have bounded entry-name evidence or implement Unicode folding. On Windows, link-target `..` segments keep the OS's lexical normalization across reparse points; on POSIX, intermediate directory components resolve with filesystem semantics inside the same read budget, a `..` segment climbs the real parent rather than the lexical one, intermediate symlinks join the revalidation snapshot with their resolved identity, and a missing or non-directory crossing — including a link that resolves to a regular file — is unknown. Comparisons stop after 64 filesystem API reads or 40 leaf-symlink hops; exhaustion, identity races and unavailable multi-link evidence are unknown. Outside that uncertain branch, ordinary unavailable paths retain lexical `samePath`. Null selections remain unavailable. Missing/corrupt selected custom catalogs remain unavailable; healing does not select another target implicitly.
 
-A matching committed owner publication establishes the baseline even while lifecycle gates prevent healing; baseline acceptance performs no write. Publications during this healer's own convergence remain fenced until its terminal result. Deliberate restore/native release fences pending work and clears retry state; successful owner empty publication is accepted. Failed or refused convergence retains an explicit pending retry, including catalog-success/cache-failure when no missing namespace remains on disk. Retries wait five minutes and obey rolling limits of six attempts and three successful heals per hour. Successful convergence accepts its result, while configuration deletion or a target change retires the old obligation. These are local cooperative recovery rules, not proof of installed Desktop or live-provider behavior.
+Once an entry is observed, any subsequent failed path lookup remains unknown, including a dangling link target; lexical fallback applies only before that evidence exists. Admission and precommit accept only proven same paths; unknown target changes and observation reuse defer healing. A committed owner publication captures the published entry's identity before any known-target or selected-target comparison, retaining that same entry, link and parent evidence through the comparisons, content read and acceptance within one bounded snapshot. The returned observation must match the retained full-width device, inode, size and nanosecond timestamp signature; unavailable retained identity refuses acceptance. After the read, the published entry must still match the current selection and its retained evidence must revalidate before a stable catalog observation retires the old generation and establishes a fresh target/baseline even when the obsolete target is unknown. Fresh publication observations remain local until acceptance; failed observation, identity drift, unknown identity or changed selection preserves the previous baseline, target, retry state and any release fence. A matching committed owner publication establishes the baseline even while lifecycle gates prevent healing; baseline acceptance performs no write, and successful owner empty publication is accepted. Unknown owner publication during active convergence invalidates pending generation/baseline state without adopting a baseline or clearing a release fence; outside convergence it preserves the prior state; only a proven matching owner publication can re-arm it. Publications during this healer's own convergence remain fenced until its terminal result. Release/native restore fences a known or selected target on same or unknown comparison and clears retry state; a proven different target is ignored. The boolean comparison helper is admission-style and is not used by release consumers. A postcommit unknown result accepts no success baseline or successful-heal credit and cannot undo a write already reported by the convergence writer. Failed or refused convergence retains an explicit pending retry, including catalog-success/cache-failure when no missing namespace remains on disk. Retries wait five minutes and obey rolling limits of six attempts and three successful heals per hour. Successful convergence accepts its result, while configuration deletion or a target change retires the old obligation. These are local cooperative recovery rules, not proof of installed Desktop or live-provider behavior.
 
 ## Codex-home diagnostics
 
@@ -523,39 +539,23 @@ Codex display-cache expiry, retained blocking main-policy evidence, and reset hi
 
 Plan-based automatic exclusions leave native credential files untouched and preserve the native-main exemption in the [selection policy](providers/openai-accounts.md#automatic-pool-plan-exclusions).
 
+## Base prompt import
+
+The [prompt contract](codex-prompts.md#base-prompt-import) governs base imports and previews.
+
 ## Prompt text probe
 
-`src/codex/prompt-text-probe.ts` reports the prompt Codex assembles for the resolved Codex home. It
-runs `codex debug prompt-input` in that home, bounded in time and in bytes, maps each rendered section
-onto a layer, and takes no caller-supplied directory. Captured process output is never serialized
-back: a failure is a classified kind plus a fixed phrase and the resolved command.
-
-The base prompt is absent from that output, because Codex discards `base_instructions` before
-rendering `prompt.input`. It is read from configuration instead, and it is read before the subprocess
-starts, so an unresolved Codex runtime, a failed probe and a cancelled request all still answer with
-it. Precedence follows Codex: a `model_instructions_file` decides the answer whenever the key is set,
-including when the file it names is missing, blank or unreadable, and otherwise the selected model's
-catalog row supplies `base_instructions`, with `model_messages.instructions_template` as the fallback.
-Only the first form is reported as text Codex sends. A template is reported as a template and the
-legacy `base-instructions` layer slot carries no text for it: that slot has five coarse reasons and no
-representation, and its dialog labels every readable layer as text sent to the model.
-
-Each configured source is opened once, non-blocking, and read to at most the probe's byte ceiling,
-which is what keeps a FIFO, a device node or an oversized file from stalling or ballooning a
-synchronous request. The regular-file check reads the opened descriptor rather than the path, and the
-whole TOML document parses before any key from it is trusted, because Codex rejects a malformed
-config outright. Every failure is a reason on the response rather than an exception, so the
-management read degrades instead of returning an error page.
+The [probe contract](codex-prompts.md#prompt-text-probe) governs prompt capture and bounded sources.
 
 ## Paginated history writer boundary
 
-`src/codex/history-provider.ts` rejects provider-history changes with `history_paginated_requires_native_writer` when a target begins with an ordinal-bearing record, later contains a paginated record after a legacy start (#4311), or declares `history_mode=paginated`. The first line alone is not sufficient: a rollout that started unnumbered and was later migrated is also refused. Apply, manifest-backed restore, and explicit legacy recovery preflight all selected targets before changing database rows or manifests. The append boundary checks again. Codex owns ordinal allocation and the live projection cursor; reading the last ordinal and appending N+1 is not safe concurrent coordination. Legacy unnumbered rollouts retain their existing behavior. History Worker targets resolve the canonical manifest first and an existing pre-normalization Windows filename second, so passing an explicit target cannot bypass upgrade recovery. This guard prevents the observed stable-format corruption; it does not implement native-writer integration.
+`src/codex/history-provider.ts` rejects provider-history changes with `history_paginated_requires_native_writer` when a target begins with an ordinal-bearing record, later contains a paginated record after a legacy start (#4311), or declares `history_mode=paginated`. The first line alone is not sufficient: a rollout that started unnumbered and was later migrated is also refused. Apply, manifest-backed restore, and explicit legacy recovery preflight all selected targets before changing database rows or manifests. The append boundary checks again. Codex owns ordinal allocation and the live projection cursor; reading the last ordinal and appending N+1 is not safe concurrent coordination. Legacy unnumbered rollouts retain their existing behavior. History Worker targets resolve the canonical manifest first and an existing pre-normalization Windows filename second, so passing an explicit target cannot bypass upgrade recovery. This guard prevents the observed stable-format corruption; it does not implement native-writer integration. Stop history writes also follow the [lifecycle ownership boundary](runtime.md), including H/C serialization for the Worker and synchronous exit.
 
 Injection preflights affected history using the normalized config candidate before writing config/profile/journal, then checks again after the complete artifact write. Native restore also rechecks after successful journal restoration or fallback removal, while exact config/profile/journal preimages and any coordinated remove transaction remain available for compensation.
 
 The preflight opens the state store read-write-free and in that order deliberately. `{ readonly: true }` is the primary open and the only one that joins a live writer's WAL shared memory, so a thread another process just migrated to paginated history is visible and refuses here. A WAL store whose last writer closed cleanly has no `-shm` to join and a read-only connection may not create one, so that open fails `SQLITE_CANTOPEN` on a perfectly healthy store and the catch-all turned it into `history_injection_preflight_unavailable` on every attempt (#4943). The immutable fallback (`immutable=1` over a `file:` URI, the same idiom as the storage scanner and the log-guard inspector) is admitted only when neither `-wal` nor `-shm` is on disk, because that is the state in which the main database is the whole store and an immutable read is exact rather than stale. Either sidecar present, or any other open failure, keeps the original error and the refusal that follows: an immutable read is a snapshot, and a refusal this preflight fails to observe is a config transition over history Codex owns. The guard covers the whole primary attempt, not only the constructor. `sqlite3_open_v2` never reads page 1, so a WAL header is not inspected until the first prepare, and on macOS that is where the absent `-shm` is raised; the first read therefore happens inside the attempt, where the error can still be classified. Bun's bundled SQLite on Linux materializes both sidecars on that same read and never fails, which is why Linux and Windows evidence could not see this gap.
 
-What a detected migration does depends on which refusal it is, and on direction. The reason that stands down is one exported constant, `HISTORY_RELABEL_STANDS_DOWN` in `src/codex/history-provider.ts`, because apply and restore have to agree on it exactly and once did not.
+The guardian and `ocx doctor` pending-history probe (`countPendingOpencodexHistory`) use the same opener in `src/codex/history-state-open.ts`. A checkpointed WAL store without sidecars is readable through that fallback and does not become a false history integrity failure; manifest and restore-target validation still run. What a detected migration does depends on which refusal it is, and on direction. The reason that stands down is one exported constant, `HISTORY_RELABEL_STANDS_DOWN` in `src/codex/history-provider.ts`, because apply and restore have to agree on it exactly and once did not.
 
 On apply, that reason retires the relabel unit and the config/profile/journal write stands when the admitted candidate preserves any existing provider table. Retention is decided before witness construction and does not depend on history preflight passing: apply keeps any existing provider definition while selecting the requested root provider. This also protects references when native migration begins after artifact commit or during worker startup, without compensating over newer native writes. Background worker failures remain reported, and candidate bytes never change after admission. Any other reason there — an unreadable state database, a changed rollout identity, a preflight that could not run — may succeed on a later attempt, so it still restores all three preimages before returning a structured refusal, including on legacy-uncoordinated homes.
 

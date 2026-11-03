@@ -21,7 +21,7 @@ import {
   cmdRoutes,
   cmdStrategy,
 } from "./account-extended";
-import { apiError, apiJson, classifyAccount, fetchRows, proxyUnreachable, resolveBaseUrl, type AccountDeps, type AccountRow, type AccountType, type ApiResult }
+import { accountClassificationConfig, apiError, apiJson, classifyAccount, fetchRows, proxyUnreachable, resolveBaseUrl, type AccountDeps, type AccountRow, type AccountType, type ApiResult }
   from "./account-api";
 
 export { classifyAccount } from "./account-api";
@@ -54,6 +54,7 @@ const ACCOUNT_USAGE = `Usage:
   ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]
   ocx account auto-switch <anthropic|anthropic2> <on|off|status|inherit|threshold <0-100>> --account <id> [--json]
   ocx account alias <provider> <account-or-key-id|alias> <display-name|-> [--json]
+  ocx account preserve-signed-in openai [on|off|status] [--apply-to-bound] [--json]
   ocx account priority <provider> <account-id|alias|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]
   ocx account pause <provider> <account-id|alias|main> [--json]
   ocx account resume <provider> <account-id|alias|main> [--json]
@@ -69,6 +70,7 @@ const ACCOUNT_USAGE = `Usage:
   ocx account login <provider> [--id <account-id>] [--reauth] [--open-browser on|off] [--add-account on|off] [--code -] [--no-wait] [--json]
   ocx account pool <provider> [--enabled on|off] [--threshold N] [--strategy NAME] [--sticky N] [--quota-window W] [--json]
   ocx account credits openai <ID on|off|--all on|off> [--json]
+  ocx account use-remaining openai <ID|main> <on|off|status> [--json]
   ocx account quota-activation openai ID --window fiveHour|weekly <on|off> [--json]
   ocx account anthropic-reset-grants [ID] [--provider anthropic|anthropic2] [--json]
   ocx account code <provider> [--flow <flow-id>] [--json]   (reads the code from stdin)
@@ -117,7 +119,7 @@ function statusText(row: AccountRow): string {
   // `paused` leads, and does NOT replace `selected`. A paused-but-selected account is the
   // state an operator most needs named -- requests route to it while the pool believes it is
   // held out -- so printing only one of the two would hide exactly the confusing case (#2703).
-  if (row.paused) parts.push("paused");
+  if (row.paused) parts.push(row.pauseDetails ? `paused(${row.pauseDetails.reason})` : "paused");
   if (row.active) parts.push(row.type === "codex" ? "selected" : "active");
   if (row.needsReauth && !(row.provider === "kiro" && row.skipReason === "needs_reauth")) {
     parts.push(row.needsReauthReason === "verify_account" ? "needs-reauth(verify)" : "needs-reauth");
@@ -199,7 +201,12 @@ async function cmdList(rest: string[], deps: AccountDeps): Promise<number> {
     console.error(ACCOUNT_USAGE);
     return 1;
   }
-  const config = deps.loadConfigImpl?.() ?? loadConfig();
+  const classification = await accountClassificationConfig(deps, deps.loadConfigImpl?.() ?? loadConfig());
+  if ("error" in classification) {
+    console.error(`Error: ${classification.error}`);
+    return 1;
+  }
+  const config = classification.config;
   const baseUrl = await resolveBaseUrl(deps);
   if (!baseUrl) return proxyUnreachable();
 
@@ -289,7 +296,12 @@ async function cmdCurrent(rest: string[], deps: AccountDeps): Promise<number> {
     console.error(ACCOUNT_USAGE);
     return 1;
   }
-  const config = deps.loadConfigImpl?.() ?? loadConfig();
+  const classification = await accountClassificationConfig(deps, deps.loadConfigImpl?.() ?? loadConfig());
+  if ("error" in classification) {
+    console.error(`Error: ${classification.error}`);
+    return 1;
+  }
+  const config = classification.config;
   const c = classifyAccount(config, name);
   if ("error" in c) {
     console.error(`Error: ${c.error}. Known candidates: ${candidateNames(config)}`);
@@ -332,7 +344,20 @@ async function cmdUse(rest: string[], deps: AccountDeps): Promise<number> {
     console.error(ACCOUNT_USAGE);
     return 1;
   }
-  const config = deps.loadConfigImpl?.() ?? loadConfig();
+  // #6957: an account change on a link Child is refused before any Home read.
+  if (!deps.baseUrl) {
+    const refusal = (await import("./link-child")).linkChildProviderChangeRefusal("ocx account use");
+    if (refusal) {
+      console.error(`Error: ${refusal}`);
+      return 1;
+    }
+  }
+  const classification = await accountClassificationConfig(deps, deps.loadConfigImpl?.() ?? loadConfig());
+  if ("error" in classification) {
+    console.error(`Error: ${classification.error}`);
+    return 1;
+  }
+  const config = classification.config;
   const c = classifyAccount(config, name);
   if ("error" in c) {
     console.error(`Error: ${c.error}. Known candidates: ${candidateNames(config)}`);
@@ -392,7 +417,20 @@ async function cmdClear(rest: string[], deps: AccountDeps): Promise<number> {
     console.error(ACCOUNT_USAGE);
     return 1;
   }
-  const config = deps.loadConfigImpl?.() ?? loadConfig();
+  // #6957: an account change on a link Child is refused before any Home read.
+  if (!deps.baseUrl) {
+    const refusal = (await import("./link-child")).linkChildProviderChangeRefusal("ocx account clear");
+    if (refusal) {
+      console.error(`Error: ${refusal}`);
+      return 1;
+    }
+  }
+  const classification = await accountClassificationConfig(deps, deps.loadConfigImpl?.() ?? loadConfig());
+  if ("error" in classification) {
+    console.error(`Error: ${classification.error}`);
+    return 1;
+  }
+  const config = classification.config;
   const c = classifyAccount(config, name);
   if ("error" in c) {
     console.error(`Error: ${c.error}. Known candidates: ${candidateNames(config)}`);
@@ -423,11 +461,11 @@ async function cmdClear(rest: string[], deps: AccountDeps): Promise<number> {
 export async function cmdAccount(args: string[], deps: AccountDeps = {}): Promise<number> {
   const [sub, ...rest] = args;
   try {
-    if (["pool", "credits", "quota-activation", "anthropic-reset-grants"].includes(sub ?? "")
+    if (["pool", "credits", "quota-activation", "anthropic-reset-grants", "use-remaining"].includes(sub ?? "")
       || (sub === "auto-switch" && rest[0]?.trim().toLowerCase() === "openai"
         && rest.some(arg => arg === "--account" || arg.startsWith("--account=")))) {
       const { handleAccountPolicyCommand } = await import("./account-policy");
-      return handleAccountPolicyCommand(sub as "pool" | "auto-switch" | "credits" | "quota-activation" | "anthropic-reset-grants", rest, deps);
+      return handleAccountPolicyCommand(sub as "pool" | "auto-switch" | "credits" | "quota-activation" | "anthropic-reset-grants" | "use-remaining", rest, deps);
     }
     if (sub === "list") return await cmdList(rest, deps);
     if (sub === "history") {
@@ -440,6 +478,10 @@ export async function cmdAccount(args: string[], deps: AccountDeps = {}): Promis
     if (sub === "refresh") return await cmdRefresh(rest, deps);
     if (sub === "auto-switch") return await cmdAutoSwitch(rest, deps);
     if (sub === "alias" || sub === "rename") return await cmdAlias(rest, deps);
+    if (sub === "preserve-signed-in") {
+      const { cmdPreserveSignedIn } = await import("./account-preservation");
+      return cmdPreserveSignedIn(rest, deps);
+    }
     if (sub === "priority") return await cmdPriority(rest, deps);
     // #2702: the server routes existed and only the CLI caller was missing, so these were
     // dashboard-only capabilities.

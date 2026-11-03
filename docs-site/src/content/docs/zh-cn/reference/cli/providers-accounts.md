@@ -5,6 +5,13 @@ description: 提供方配置、凭据、配额，以及模型目录命令。
 
 这些命令用于配置上游提供方、认证账号、管理凭据池，并控制暴露给 Codex 的模型目录。
 
+使用剩余套餐额度可通过 `ocx account use-remaining openai main on` 开启，再用
+`ocx account use openai main` 选择主账号；`status --json` 查看状态，`off` 关闭。
+将 `main` 替换为唯一的池账号 ID 或别名即可控制该账号。开启后关闭该账号按用量提前切换；
+主账号的短、长窗口硬锁阈值延后到 100%。开关跨重启保留，关闭后恢复原有阈值。
+暂停、重新认证、上游冷却和付费 credits 权限仍然生效；此开关不会开启付费额度。
+详见[英文说明](/reference/cli/providers-accounts/#use-remaining-included-quota)。
+
 ## 提供方
 
 ### `ocx provider <subcommand>`
@@ -25,6 +32,7 @@ description: 提供方配置、凭据、配额，以及模型目录命令。
 | `quota` | `--refresh`, `--json` | 读取提供方配额报告。 |
 | `presets` | `--json` | 列出仪表盘提供方预设。 |
 | `account-mode` | `pool`, `direct`, `--json` | 选择 Codex 账号的池化或直连路由。 |
+| `import-cc-switch` | `--source <FILE>`, `--provider <id>`, `--apply`, `--restore`, `--allow-private-network`, `--json` | 从 CC-Switch SQLite（`cc-switch.db`）或旧版 JSON 文件预览、选择性应用或恢复无密钥提供商条目。 |
 
 默认的 `add`、`remove` 和 `set-default` 修改本地配置。修改运行中的代理需加 `--live`，在线删除还需 `--yes`。`--sync --json` 同样会在保存后尝试同步；失败时保留保存结果，以非零状态退出，并返回 `needsSync: true`。`--live` 不能与 `--sync` 同用。pacing 和 snapshot/apply 操作见[英文指南](/reference/cli/providers-accounts/#snapshot-edit-and-apply-with-a-baseline)。
 
@@ -54,6 +62,27 @@ ocx models live --provider ark --json
 
 任何机密内容请使用 `--api-key` 或 OAuth 登录。
 :::
+
+### 无密钥导入 CC-Switch 提供商
+
+```bash
+ocx provider import-cc-switch --source ~/.cc-switch/cc-switch.db
+ocx stop
+ocx provider import-cc-switch --source ~/.cc-switch/cc-switch.db --provider my-provider --apply
+# 在另一个终端启动代理（或运行 ocx ensure），再添加密钥：
+ocx start
+printf '%s\n' "$API_KEY" | ocx account add-key my-provider
+
+# 独立的回滚路径（先停止代理；仅移除未修改的无密钥条目）：
+ocx stop
+ocx provider import-cc-switch --restore
+```
+
+`ocx provider import-cc-switch` 仅从普通本地 CC-Switch SQLite 数据库或旧版 JSON 文件中投射显式白名单内的非机密元数据字段（提供商 ID、应用类型、base URL、协议适配器与默认模型）。为扫描输入会临时读取源文件与内嵌配置字节，但密钥/凭据字段、自由文本显示名称与 TOML 注释会在字节层跳过，绝不解码为字符串、写入磁盘或记录日志，且临时字节缓冲区会在 `finally` 中清零。窄化 base URL 路径规则（`http(s)://host[:port]` 配空路径或 1–4 个小写 `[a-z0-9._-]` API 路径段，如 `/v1`、`/api/v1` 或 `/compatible-mode/v1`）与标识符/模型语法校验仅作为纵深防御并拒绝不合规值（不回显原值）。源文件通过 `O_NOFOLLOW | O_NONBLOCK` 描述符校验单次打开，SQLite 在内存中只读反序列化且不写入临时文件；具有多个硬链接（`nlink > 1`）的 SQLite 文件会被拒绝以防通过别名路径绕过伴随文件检查，若同级 `-wal` 或 `-journal` 文件非空则会拒绝导入并提示先关闭 CC-Switch（或执行数据库 checkpoint）再重试。请仅从受信任的本地 CC-Switch 源文件导入，并在添加凭据前核对输出的每个 ID、模型与 `baseUrl`：
+
+- **预览（默认）：** 需要 `--source <FILE>`，不写入任何内容，报告发现、可用、冲突与无效条目数量。
+- **应用（`--apply`）：** 需要 `--source <FILE>` 且代理已停止（`ocx stop`），在 Remote Link Child 上会被拒绝。重复指定 `--provider <id>` 可仅导入所选条目，传入 `--allow-private-network` 可允许环回或私有网络 base URL。即使未事先预览，`--apply` 也会在写入无密钥提供商条目及回滚日志 `$OPENCODEX_HOME/cc-switch-provider-import-journal.json` 之前输出每个导入提供商的 ID、默认模型与目标 URL（文本模式输出到 `stdout`，`--json` 模式输出到 `stderr`）；存在活动回滚日志时再次运行 `--apply` 会被拒绝。核对输出条目后启动代理（在另一终端运行 `ocx start` 或运行 `ocx ensure`），再通过 `printf '%s\n' "$API_KEY" | ocx account add-key <provider>`（管道标准输入）或 `ocx login <provider>` 添加凭据。
+- **恢复（`--restore`）：** 独立的回滚路径（而非添加凭据的后续步骤），要求代理已停止（`ocx stop`），在 Remote Link Child 上会被拒绝，且不接受 `--source`、`--provider` 或 `--allow-private-network`。它会以只读字节方式检查 `auth.json`（不可读或格式损坏时安全保留），仅从活动日志中移除仍保持导入时无密钥状态、未被选为 `defaultProvider`，且未被路由、组合（combos）、回退策略（fallback policy）、OAuth 账户或 API 密钥引用的提供商。
 
 ## 认证
 
@@ -141,6 +170,12 @@ OAuth 账号会显示为 `Account N`，而 plan/label 列会在 plan、屏蔽后
 ```
 
 ### `ocx account list [provider] [--json] [--all] [--quota [--refresh]]`
+
+即使主机上没有原生 Codex 主目录，保存的 ChatGPT 池账号仍可列出，包括在仪表盘中和刷新账号时。
+查询列表不会创建 Codex 主目录，也不会退出原生主账号。禁用 Codex 客户端集成不会停止
+观测已有原生登录的配额；显式设置的 `CODEX_HOME` 路径无效时，仍会报告配置错误。
+如果 `OPENCODEX_HOME` 存储不安全，即使没有原生 Codex 主目录，也会报告错误。
+解析默认 Codex 主目录路径时，如果该路径是文件、目标不存在的符号链接，或父目录无法遍历，也会报告错误。
 
 不指定提供方时，会列出 Codex 池、OAuth 账号和已配置的 API 密钥池。除非提供
 `--all`，否则会跳过空的提供方。指定提供方时，只列出该凭据家族。人类可读输出

@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { findLiveProxy } from "../server/proxy-liveness";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ELEVATION_REQUEST_TIMEOUT_MS, OCX_ELEVATED_PROTOCOL_FAILED, raceWithTimeout, resolveTrustedWindowsSchtasksExe, startElevatedSchtasksCreateAndRun, runWindowsElevated, toWindowsSchtasksError, WindowsElevationError, type ElevatedSchedulerOutcome, type ElevatedSchtasksCreateAndRunExecution, type ElevatedSchtasksCreateAndRunResult } from "../lib/windows-elevation";
 import { statusWinswRaw } from "../lib/winsw";
@@ -10,8 +9,9 @@ import { isTestHomeGuardArmed } from "../lib/test-home-guard";
 import { TASK, windowsServiceScriptPath, windowsLauncherVbsPath, windowsTaskXmlPath, writeServiceInstallState } from "./state";
 import { buildWindowsSchtasksCreateArgs, windowsTaskRegistrationOwnedByAttempt, windowsTaskRegistrationHealthy } from "./windows-taskxml";
 import type { ExpectedWindowsTaskUserId } from "./windows-taskxml";
-import { win32 } from "node:path";
 import { WINSW_SERVICE_ID } from "../lib/winsw";
+
+export { windowsWscript } from "./windows-wscript";
 
 /**
  * Decode schtasks stdout. `/query /xml` emits UTF-16LE (often with BOM) because the
@@ -69,14 +69,9 @@ function windowsSchtasks(): string {
   return resolveTrustedWindowsSchtasksExe();
 }
 
-export function windowsWscript(): string {
-  const candidate = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
-  return existsSync(candidate) ? candidate : "wscript.exe";
-}
-
 let querySchtasksForTests: ((args: string[]) => string) | null = null;
 
-export function querySchtasks(args: string[]): string {
+export function querySchtasks(args: string[], beforeMutation?: () => void): string {
   // The repository preload isolates HOME and OPENCODEX_HOME, but Task Scheduler is
   // machine-global. A partially-faked service test once fell through here and replaced the
   // user's real `opencodex-proxy` task with a launcher inside its temporary test home; the
@@ -91,8 +86,10 @@ export function querySchtasks(args: string[]): string {
       + "inject the scheduler operation instead of calling the live manager.",
     );
   }
-  if (querySchtasksForTests) return querySchtasksForTests(args);
-  return runFile(windowsSchtasks(), args);
+  if (querySchtasksForTests) { beforeMutation?.(); return querySchtasksForTests(args); }
+  const file = windowsSchtasks();
+  beforeMutation?.();
+  return runFile(file, args);
 }
 
 /** Test-only seam for Task Scheduler query used by presence probes. */
@@ -100,11 +97,28 @@ export function setQuerySchtasksForTests(next: ((args: string[]) => string) | nu
   querySchtasksForTests = next;
 }
 
-export function schtasks(args: string[]): string {
+export function schtasks(args: string[], control: (() => void) | {
+  run?: (args: string[]) => string;
+  probeTask?: () => WindowsSchedulerTaskProbe;
+} = {}): string {
+  const beforeMutation = typeof control === "function" ? control : undefined;
+  const io = typeof control === "function" ? {} : control;
+  let refused = false;
+  const gate = beforeMutation && (() => { try { beforeMutation(); } catch (error) { refused = true; throw error; } });
   try {
-    return querySchtasks(args);
+    return io.run ? io.run(args) : querySchtasks(args, gate);
   } catch (error) {
-    throw toWindowsSchtasksError(error, args);
+    if (refused) throw error;
+    let taskPresent = false;
+    const normalized = args.map(arg => arg.toLowerCase());
+    const taskIndex = normalized.indexOf("/tn");
+    if (normalized[0] === "/delete" && taskIndex > 0 && normalized[taskIndex + 1] === TASK
+      && error && typeof error === "object" && "status" in error && error.status === 1) {
+      try {
+        taskPresent = (io.probeTask ?? probeWindowsSchedulerTask)().status === "present";
+      } catch { /* An unreadable task is not proof of an access denial. */ }
+    }
+    throw toWindowsSchtasksError(error, args, taskPresent);
   }
 }
 
@@ -179,6 +193,10 @@ export async function inspectWindowsSchedulerServiceStatus(io: {
 }
 
 export function schtasksErrorDetail(error: unknown): string {
+  if (error && typeof error === "object"
+    && ("status" in error || "stderr" in error || "stdout" in error)) {
+    return toWindowsSchtasksError(error, ["/query"]).message;
+  }
   return error instanceof Error ? error.message : String(error);
 }
 

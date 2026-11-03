@@ -14,9 +14,11 @@ import {
 } from "./runtime-api";
 import { followLogs } from "./log-follow";
 import { handleLogFilterCommand } from "./log-view-filter";
+import { handleLogGetCommand, handleLogHistoryCommand } from "./log-history";
 import { followInjection } from "./injection-follow";
 import type { ObserveStreamDeps } from "./observe-stream";
 import { formatUsageReport } from "./usage-report";
+import { handleUsageCompareCommand } from "./usage-compare";
 import { selectUsageModelView, takeUsageSearchOption } from "./usage-model-search";
 import { USAGE_RANGES, USAGE_SURFACES, type UsageSummary, type UsageFilterEcho } from "../usage/summary";
 import { parseUsageTimeWindow, type UsageTimeWindow } from "../usage/time-range";
@@ -30,12 +32,16 @@ const USAGE = `Usage:
   ocx observe logs [--provider <name>] [--model <id>] [--status <code>]
       [--conversation <id>] [--account <label>] [--limit <n>] [--follow] [--json|--jsonl] [--events]
   ocx logs explain <request-id> [--json]
+  ocx logs history [selectors] [--cursor <token>] [--limit <1-100>] [--json|--jsonl]
+  ocx logs get <request-id> [--json]
   ocx logs filter [selectors] [--scan-limit <1..2000>] [--limit <1..2000>] [--json|--jsonl]
   ocx logs rebuild-index
   ocx logs index-status
   ocx observe usage [--range <today|1d|7d|30d|all>] [--surface <all|codex|claude|grok>]
       [--since <epoch-ms|ISO-datetime>] [--until <epoch-ms|ISO-datetime>]
-      [--provider <name>] [--model <id>] [--api-key-id <id>] [--search <text>] [--json]
+      [--provider <name>] [--model <id>] [--api-key-id <id>] [--search <text>] [--top <1-1000>] [--json]
+  ocx usage compare [--range <today|1d|7d|30d>] [--surface <all|codex|claude|grok>]
+      [--provider <name>] [--model <id>] [--api-key-id <id>] [--json]
   ocx observe storage [codex-logs [status|protect|unprotect|repair|compact] [--mode <compat|quiet>]] [--json]
   ocx observe memory [--json]
   ocx observe debug [--json]
@@ -113,8 +119,12 @@ async function logs(argv: string[], deps: ObserveStreamDeps): Promise<number> {
     return followLogs({ query: new URLSearchParams(query(params)), limit, jsonl: wantsJsonl, events: wantsEvents, formatRow: formatLog }, deps);
   }
   const data = await runtimeRequest(`/api/logs${query(params)}`, {}, deps);
+  const rows = logRows(data);
+  if (!wantsJson && !wantsJsonl && rows.length === 0 && [provider, model, status, conversationId, account].some(Boolean)) {
+    console.log("No log entry matched the filters.");
+  }
   if (wantsJson) printData(data, true);
-  else for (const row of logRows(data)) {
+  else for (const row of rows) {
     if (wantsJsonl) console.log(JSON.stringify(row));
     else console.log(formatLog(row));
   }
@@ -170,6 +180,7 @@ async function indexStatus(argv: string[], deps: RuntimeApiDeps): Promise<void> 
 async function usage(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const args = [...argv];
   const search = takeUsageSearchOption(args);
+  const top = takeIntegerOption(args, "--top", { min: 1, max: 1000 });
   const wantsJson = takeFlag(args, "--json");
   const range = takeOption(args, "--range") ?? "30d";
   const surface = takeOption(args, "--surface") ?? "all";
@@ -206,8 +217,12 @@ async function usage(argv: string[], deps: RuntimeApiDeps): Promise<void> {
     if (token.kind !== "present" || token.fingerprint !== connection.value.tokenFingerprint) {
       throw new Error("Client usage unavailable: the enrolled data key is missing or changed; repair the client connection");
     }
+    // A Remote Link Child sends this read through the connection-bound link relay (#6957).
+    const link = connection.value.transport === "link" && connection.value.link;
+    const peerFetch = deps.fetchImpl
+      ?? (link ? (await import("../client/link-home")).linkBoundFetch(connection.value, token.token) : undefined);
     result = await fetchHubUsage(connection.value.serverUrl, token.token, new URLSearchParams(suffix), {
-      fetchImpl: deps.fetchImpl, timeoutMs: 60_000,
+      fetchImpl: peerFetch, timeoutMs: 60_000, ...(link ? { peer: "Home" as const } : {}),
     });
     const current = readClientConnectionState();
     const currentToken = readServiceApiTokenState();
@@ -238,10 +253,10 @@ async function usage(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   // the call, so passing formatUsageReport(...) inline would run the human
   // renderer during --json and let its assumptions affect a path that is meant
   // to bypass it entirely.
-  const view = search === undefined ? undefined : selectUsageModelView(result, search);
+  const view = search === undefined ? undefined : selectUsageModelView(result, search, wantsJson ? undefined : top);
   const displayed = view ?? result;
   if (wantsJson) printData(displayed, true);
-  else printData(displayed, false, formatUsageReport(displayed as Parameters<typeof formatUsageReport>[0], view ? { modelView: view.modelView } : undefined));
+  else printData(displayed, false, formatUsageReport(displayed as Parameters<typeof formatUsageReport>[0], { modelView: view?.modelView, modelRowLimit: top }));
 }
 
 async function simple(path: string, argv: string[], deps: RuntimeApiDeps): Promise<void> {
@@ -312,12 +327,17 @@ export async function handleObserveCommand(argv: string[], deps: ObserveStreamDe
     if (sub === "logs") {
       const action = rest[0];
       if (action === "filter") streamExit = await handleLogFilterCommand(rest.slice(1), deps, formatLog);
+      else if (action === "history") await handleLogHistoryCommand(rest.slice(1), deps, formatLog);
+      else if (action === "get") await handleLogGetCommand(rest.slice(1), deps, formatLog);
       else if (action === "explain") await explain(rest.slice(1), deps);
       else if (action === "rebuild-index") await rebuildIndex(rest.slice(1), deps);
       else if (action === "index-status") await indexStatus(rest.slice(1), deps);
       else streamExit = await logs(rest, deps);
     }
-    else if (sub === "usage") await usage(rest, deps);
+    else if (sub === "usage") {
+      if (rest[0] === "compare") await handleUsageCompareCommand(rest.slice(1), deps);
+      else await usage(rest, deps);
+    }
     else if (sub === "storage") await storage(rest, deps);
     else if (sub === "memory") await simple("/api/system/memory", rest, deps);
     else if (sub === "debug") await simple("/api/debug", rest, deps);

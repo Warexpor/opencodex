@@ -4,12 +4,13 @@ import { createHash } from "node:crypto";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { CLAUDE_CLI_USER_AGENT } from "../providers/claude-cli-identity";
 import type { OAuthCredentials } from "./types";
+import { normalizeAnthropicPlan } from "../providers/anthropic-subscription";
 
 const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
 const PROFILE_TIMEOUT_MS = 10_000;
 const PROFILE_MAX_BYTES = 65_536;
 export type AnthropicIdentity = NonNullable<OAuthCredentials["anthropicIdentity"]>;
-export type AnthropicIdentityResolver = (access: string, signal?: AbortSignal) => Promise<AnthropicIdentity | undefined>;
+export type AnthropicIdentityResolver = (access: string, signal?: AbortSignal) => Promise<(AnthropicIdentity & { plan?: string }) | undefined>;
 
 export function bindAnthropicIdentity(access: string, accountUuid: unknown): AnthropicIdentity | undefined {
   if (!access || typeof accountUuid !== "string" || !accountUuid.length || accountUuid.length > 128
@@ -48,8 +49,14 @@ export const resolveAnthropicAccountIdentity: AnthropicIdentityResolver = async 
     const data: unknown = JSON.parse(body.text);
     if (!data || typeof data !== "object" || !("account" in data)) return undefined;
     const account = data.account;
-    return account && typeof account === "object" && "uuid" in account
+    const identity = account && typeof account === "object" && "uuid" in account
       ? bindAnthropicIdentity(access, account.uuid) : undefined;
+    if (!identity) return undefined;
+    const organization = "organization" in data ? data.organization : undefined;
+    const org = organization && typeof organization === "object"
+      ? organization as Record<string, unknown> : undefined;
+    const plan = normalizeAnthropicPlan(org?.rate_limit_tier) ?? normalizeAnthropicPlan(org?.organization_type);
+    return { ...identity, ...(plan ? { plan } : {}) };
   } catch {
     // Unavailable identity is an explicit unresolved result, never an ownership guess.
     return undefined;

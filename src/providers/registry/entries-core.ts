@@ -1,4 +1,14 @@
+import { OPENCODE_GO_BASE_URL, OPENCODE_GO_RESPONSES_DEFAULTS } from "../../types/opencode-go";
 import { KIRO_MODELS, KIRO_MODEL_CONTEXT_WINDOWS, KIRO_MODEL_REASONING_EFFORTS } from "../kiro-models";
+import {
+  DSH_ACCOUNT_MODELS,
+  DSH_ACCOUNT_DEFAULT_MODEL,
+  DSH_ACCOUNT_MODEL_CONTEXT_WINDOWS,
+  DSH_ACCOUNT_MODEL_INPUT_MODALITIES,
+  DSH_ACCOUNT_MODEL_MAX_OUTPUT_TOKENS,
+  DSH_ACCOUNT_MODEL_REASONING_EFFORTS,
+  DSH_ACCOUNT_MODEL_DISPLAY_NAMES,
+} from "../dsh-account-models";
 import { DEVIN_MODEL_CONTEXT_WINDOWS, DEVIN_MODEL_EFFORTS, DEVIN_DEFAULT_EFFORTS } from "../../adapters/devin/live-models";
 import { ANTIGRAVITY_MODELS, ANTIGRAVITY_MODEL_CONTEXT_WINDOWS, ANTIGRAVITY_MODEL_EFFORTS, ANTIGRAVITY_MODEL_INPUT_MODALITIES } from "../antigravity-models";
 import {
@@ -32,12 +42,12 @@ import {
   OPENAI_API_GPT56_MAX_INPUT_TOKENS,
   OPENAI_API_GPT56_VIRTUAL_MODELS,
   OPENAI_API_GPT56_REASONING_EFFORTS,
-  META_MUSE_REASONING_EFFORTS,
-  META_MUSE_REASONING_EFFORT_MAP,
+  META_MODEL_API_REASONING_EFFORTS,
+  META_MODEL_API_REASONING_EFFORT_MAPS,
   META_MUSE_CODE_REASONING_EFFORTS,
   META_MUSE_CODE_REASONING_EFFORT_MAP,
   META_MUSE_CONTEXT_WINDOW,
-  META_MUSE_MODELS,
+  META_MODEL_API_MODELS,
   OPENAI_DAYBREAK_MODELS,
   OPENAI_DAYBREAK_CONTEXT_WINDOWS,
   OPENAI_DAYBREAK_MAX_INPUT_TOKENS,
@@ -241,7 +251,8 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // (it is the current catalog, so its default ordering wins), then the ids
     // only the old devin entry carried. Degraded-mode seed only either way —
     // `liveModels` discovers the account's real roster.
-    models: ["swe-2", "swe-1-7", "gpt-5-6-sol", "gpt-6-astra", "gpt-6-1-sol", "gpt-6-sol", "gpt-6-luna", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5", "glm-5-3", "kimi-k3", "gemini-3-8-flash", "grok-4-6", "grok-4-7", "swe-1-7-lightning", "gpt-5-6-luna", "gpt-5-6-terra", "claude-opus-4-8", "glm-5-2", "kimi-k2-7", "grok-4-5"],
+    // 261027 preemptive: GPT-6.1 Terra (same degraded seed policy as GPT-6.1 Sol).
+    models: ["swe-2", "swe-1-7", "gpt-5-6-sol", "gpt-6-astra", "gpt-6-1-sol", "gpt-6-1-terra", "gpt-6-sol", "gpt-6-luna", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5", "glm-5-3", "kimi-k3", "gemini-3-8-flash", "grok-4-6", "grok-4-7", "swe-1-7-lightning", "gpt-5-6-luna", "gpt-5-6-terra", "claude-opus-4-8", "glm-5-2", "kimi-k2-7", "grok-4-5"],
     liveModels: true,
     defaultModel: "swe-2",
     modelContextWindows: DEVIN_MODEL_CONTEXT_WINDOWS,
@@ -507,6 +518,36 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     parallelToolCalls: false,
   },
   {
+    id: "workbuddy-ai", label: "WorkBuddy AI", adapter: "workbuddy-ai",
+    baseUrl: "https://www.workbuddy.ai/v2", authKind: "oauth", oauthId: "workbuddy-ai",
+    featured: false, dashboardPreset: true, liveModels: true,
+    defaultModel: "default-model", models: ["default-model"],
+    modelDiscovery: { path: "/v3/config", format: "workbuddy" },
+    dashboardUrl: "https://www.workbuddy.ai",
+    note: "Use your WorkBuddy AI international subscription. Sign in in your browser; models follow your account catalog.",
+  },
+  {
+    id: "dsh-account",
+    label: "DeepSeek Account (DSH)",
+    adapter: "dsh-account",
+    baseUrl: "https://api.deepseek.com/anthropic",
+    authKind: "oauth",
+    oauthId: "dsh-account",
+    featured: false,
+    dashboardPreset: true,
+    note: "Import-first: reuses your installed and signed-in DeepSeek Harness Desktop account. Add account imports the grant from ~/.dsh/.credentials.yaml and verifies it with the DeepSeek platform.",
+    dashboardUrl: "https://platform.deepseek.com",
+    // Static catalog: the account token never authorizes model discovery (src/oauth/model-discovery-auth.ts).
+    liveModels: false,
+    defaultModel: DSH_ACCOUNT_DEFAULT_MODEL,
+    models: [...DSH_ACCOUNT_MODELS],
+    modelContextWindows: DSH_ACCOUNT_MODEL_CONTEXT_WINDOWS,
+    modelInputModalities: DSH_ACCOUNT_MODEL_INPUT_MODALITIES,
+    modelMaxOutputTokens: DSH_ACCOUNT_MODEL_MAX_OUTPUT_TOKENS,
+    modelReasoningEfforts: DSH_ACCOUNT_MODEL_REASONING_EFFORTS,
+    modelDisplayNames: DSH_ACCOUNT_MODEL_DISPLAY_NAMES,
+  },
+  {
     id: "orcarouter-oauth",
     label: "OrcaRouter - Auth",
     adapter: "openai-chat",
@@ -717,6 +758,8 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
       ...OPENAI_DAYBREAK_REASONING_EFFORTS,
       "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
       ...Object.fromEntries(OPENAI_GPT6_MODELS.map(id => [id, ["low", "medium", "high", "xhigh", "max"]])),
+      // OpenAI API model page (2026-10-27): Terra also accepts none; Sol does not.
+      "gpt-6.1-terra": ["none", "low", "medium", "high", "xhigh", "max"],
     },
     virtualModels: OPENAI_API_GPT56_VIRTUAL_MODELS,
   },
@@ -736,7 +779,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     authKind: "key",
     dashboardUrl: "https://dev.meta.ai/docs/authentication",
     defaultModel: "muse-spark-1.3",
-    models: META_MUSE_MODELS,
+    models: META_MODEL_API_MODELS,
     // Static roster: no authenticated /v1/models payload was ever observed (the only
     // contact was an unauthenticated GET returning 401 invalid_api_key), and Meta serves
     // non-agent families on this same base URL. Turning discovery on would publish an
@@ -746,20 +789,20 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // without this, registry transport canonicalization would retarget it and send their
     // saved key to Meta.
     preserveCustomDestination: true,
-    modelContextWindows: Object.fromEntries(META_MUSE_MODELS.map(id => [id, META_MUSE_CONTEXT_WINDOW])),
+    modelContextWindows: Object.fromEntries(META_MODEL_API_MODELS.map(id => [id, META_MUSE_CONTEXT_WINDOW])),
     // text+image only. Meta also documents video, audio (degraded on 1.3), and PDF, but
     // the catalog modality enum is text/image and over-advertising poisons the exported
     // client config (see tests/codex-integration/catalog-input-modality-enum.test.ts).
-    modelInputModalities: Object.fromEntries(META_MUSE_MODELS.map(id => [id, ["text", "image"] as ["text", "image"]])),
-    modelReasoningEfforts: Object.fromEntries(META_MUSE_MODELS.map(id => [id, META_MUSE_REASONING_EFFORTS])),
-    modelReasoningEffortMap: Object.fromEntries(META_MUSE_MODELS.map(id => [id, META_MUSE_REASONING_EFFORT_MAP])),
+    modelInputModalities: Object.fromEntries(META_MODEL_API_MODELS.map(id => [id, ["text", "image"] as ["text", "image"]])),
+    modelReasoningEfforts: META_MODEL_API_REASONING_EFFORTS,
+    modelReasoningEffortMap: META_MODEL_API_REASONING_EFFORT_MAPS,
     // No defaultMaxOutputTokens: Meta publishes none. The only number in its docs
     // (131072) appears inside a third-party config sample, and the protocol pages call
     // the real limit "model-dependent".
     // Meta names its variable MODEL_API_KEY, but the env var opencodex reads is derived
     // from the provider id (META_MODEL_API_KEY). Saying only Meta's name would send a
     // user to export a variable this proxy never reads.
-    note: "Pay-as-you-go Meta Model API. Get a key at https://dev.meta.ai (Meta calls it MODEL_API_KEY; export it here as META_MODEL_API_KEY) — a Meta developer account needs a payment method before it can serve requests, and every call is metered per token. A Muse Code subscription does NOT work here: Meta scopes that credential to the Muse Code CLI and bills any other key pay-as-you-go (dev.meta.ai/docs/muse-code/subscriptions). The Contributor tier (muse-spark-1.3-contributor) is cheap because Meta trains on your prompts — about 92% off input, 95% off output, 99% off cached input; do not send confidential material through it. Muse Spark is also reachable through resellers: command-code carries both tiers, opencode-go serves only muse-spark-1.3-contributor.",
+    note: "Pay-as-you-go Meta Model API. Get a key at https://dev.meta.ai (Meta calls it MODEL_API_KEY; export it here as META_MODEL_API_KEY) — a Meta developer account needs a payment method before it can serve requests, and every call is metered per token. A Muse Code subscription does NOT work here: Meta scopes that credential to the Muse Code CLI and bills any other key pay-as-you-go (dev.meta.ai/docs/muse-code/subscriptions). The Contributor tier (muse-spark-1.3-contributor) is cheap because Meta trains on your prompts — about 92% off input, 95% off output, 99% off cached input; do not send confidential material through it. Muse Wonder (muse-wonder-1.0, preview) is Standard mode only on this API ($4 input / $20 output per 1M tokens, no Contributor tier) and accepts reasoning effort up to max; the Spark rows stop at xhigh. Muse Spark is also reachable through resellers: command-code carries both tiers, opencode-go serves only muse-spark-1.3-contributor.",
   },
   /* [Decision Log]
   - 목적과 의도: Let an operator who already signed the Muse Code CLI in reach Muse Spark with that credential, instead of provisioning a second key.
@@ -787,14 +830,14 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     oauthId: "meta-muse",
     dashboardUrl: "https://dev.meta.ai",
     defaultModel: "muse-spark-1.3",
-    models: META_MUSE_MODELS,
+    models: META_MODEL_API_MODELS,
     // Same reason as meta-model: the authenticated roster carries muse-image-1.0 and
     // muse-voice-transcribe-1.0, which this Responses-agent provider cannot drive.
     liveModels: false,
-    modelContextWindows: Object.fromEntries(META_MUSE_MODELS.map(id => [id, META_MUSE_CONTEXT_WINDOW])),
-    modelInputModalities: Object.fromEntries(META_MUSE_MODELS.map(id => [id, ["text", "image"] as ["text", "image"]])),
-    modelReasoningEfforts: Object.fromEntries(META_MUSE_MODELS.map(id => [id, META_MUSE_CODE_REASONING_EFFORTS])),
-    modelReasoningEffortMap: Object.fromEntries(META_MUSE_MODELS.map(id => [id, META_MUSE_CODE_REASONING_EFFORT_MAP])),
+    modelContextWindows: Object.fromEntries(META_MODEL_API_MODELS.map(id => [id, META_MUSE_CONTEXT_WINDOW])),
+    modelInputModalities: Object.fromEntries(META_MODEL_API_MODELS.map(id => [id, ["text", "image"] as ["text", "image"]])),
+    modelReasoningEfforts: Object.fromEntries(META_MODEL_API_MODELS.map(id => [id, META_MUSE_CODE_REASONING_EFFORTS])),
+    modelReasoningEffortMap: Object.fromEntries(META_MODEL_API_MODELS.map(id => [id, META_MUSE_CODE_REASONING_EFFORT_MAP])),
     note: "Signs in to Meta with a browser device code on any platform, then mints the Muse Code subscription key. That grant is reimplemented from the one the Muse Code CLI performs and has NOT been exercised against Meta from OpenCodex, so treat the first login as unverified. If the Muse Code CLI is already signed in on macOS, the existing key is imported instead of starting a new grant. A pasted key from https://dev.meta.ai still works as a fallback when a device login cannot complete, and faces the same format check and live validation. A device login authenticates as Meta own Muse Code client, which is a stronger claim than reusing a key the CLI already minted. Meta scopes that credential to the Muse Code CLI, so this is an UNSUPPORTED use: Meta does not authorize subscription coverage outside its own CLI, how these calls settle is not observable from the API, and you should treat every call as billable against your account. The key, imported or pasted, is copied into OpenCodex's auth store. For an account signed in with the device login, OpenCodex refreshes Meta's subscription windows on demand from the same key endpoint the login uses, at most once every five minutes. For an imported or pasted key there is no endpoint to query them on demand, so OpenCodex reads them from streaming responses and shows the last observed value with its age; refreshing one then requires another streaming turn, and translated (non-passthrough) turns report none. Rate limits apply per team, not per key. For a supported path use the meta-model provider with your own key (export it as META_MODEL_API_KEY).",
   },
   {
@@ -824,7 +867,8 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     escapeBuiltinToolNames: true,
   },
   {
-    id: "opencode-go", label: "opencode go", adapter: "openai-chat", baseUrl: "https://opencode.ai/zen/go/v1",
+    id: "opencode-go", label: "opencode go", adapter: "openai-chat", baseUrl: OPENCODE_GO_BASE_URL,
+    destinationAliases: [{ adapter: "openai-chat", baseUrl: "https://opencode.ai/inference/go/v1" }],
     authKind: "key", featured: true, dashboardUrl: "https://opencode.ai/auth", defaultModel: "kimi-k2.7-code",
     jawcodeBundle: "opencode-go", note: "GLM, DeepSeek, Kimi, Qwen, MiMo…",
     // Zen Go can close a Chat stream after a fully assembled function call without sending
@@ -846,13 +890,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     - 다른 대안 대신 이 방식을 선택한 이유: OpenCode Go documents sibling models on Chat or Anthropic endpoints, and an exact registry default preserves both those routes and explicit opt-out precedence.
     - 장점, 단점 및 영향: Each listed model reaches `/responses` from every inbound surface without changing siblings; a future upstream endpoint change requires an evidence-backed registry update.
     */
-    modelWireDefaults: {
-      "gpt-5.6-luna": "openai-responses",
-      "grok-4.6": "openai-responses",
-      "grok-4.7": "openai-responses",
-      "muse-spark-1.3-contributor": "openai-responses",
-      "muse-spark-1.2-contributor": "openai-responses",
-    },
+    modelWireDefaults: OPENCODE_GO_RESPONSES_DEFAULTS,
     modelContextWindows: {
       "kimi-k3": KIMI_K3_STANDARD_CONTEXT_WINDOW,
       // Zen Go discovers only the gateway id, so carry DeepSeek's official 1M V4.1
@@ -909,6 +947,9 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     },
     modelReasoningEfforts: {
       "gpt-5.6-luna": OPENAI_API_GPT56_REASONING_EFFORTS,
+      // Gemini's native thinkingLevel ladder; higher Codex efforts clamp to high.
+      // https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+      "gemini-4-argon-contributor": ["low", "medium", "high"],
       "grok-4.6": ["low", "medium", "high", "xhigh"],
       "grok-4.7": ["low", "medium", "high", "xhigh"],
       "glm-5.3": ZAI_GLM_53_REASONING_EFFORTS,
@@ -1060,6 +1101,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
       "openai/gpt-6-luna": true,
       // Listed 2026-09-29 as an OpenAI-backed route like GPT-6 Sol.
       "openai/gpt-6.1-sol": true,
+      "openai/gpt-6.1-terra": true,
     },
     // Deliberately no OpenRouter route pin: it bills the endpoint actually used and reports the
     // actual service_tier. B0 confirmation therefore owns downgrade safety. Forcing `only` plus
@@ -1140,10 +1182,8 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // https://cf.api.fan/v1 — GET /v1/models answers 401 without a key, so the host is live and
     // discovery narrows to what the key's token group allows. Model ids are bare OpenAI-style
     // ids (the Codex token group lists gpt-5.5 / gpt-5.1-codex).
-    // Standard sponsor under SPONSORS.md; the dashboardUrl carries their affiliate code.
     id: "packycode", label: "PackyCode", adapter: "openai-chat", baseUrl: "https://cf.api.fan/v1",
-    authKind: "key", dashboardUrl: "https://www.packyapi.com/register?aff=k5KT",
-    sponsor: { tier: "standard", url: "https://www.packyapi.com/register?aff=k5KT" },
+    authKind: "key", dashboardUrl: "https://www.packyapi.com",
     defaultModel: "gpt-5.5",
     models: ["gpt-5.5", "gpt-5.1-codex"],
     liveModels: true,
@@ -1170,13 +1210,16 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
   // devlog/_plan/260710_provider_hardening/001_research_frontier.md.
   {
     id: "google", label: "Google Gemini", adapter: "google", baseUrl: "https://generativelanguage.googleapis.com", authKind: "key", featured: true,
-    dashboardUrl: "https://aistudio.google.com/apikey", defaultModel: "gemini-3.5-flash", models: ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.7-flash"],
-    modelContextWindows: { "gemini-3.8-flash": 1_048_576, "gemini-3.6-flash": 1_048_576, "gemini-3.5-flash": 1_000_000, "gemini-3.5-flash-lite": 1_048_576, "gemini-3.7-flash": 1_048_576 },
-    modelInputModalities: { "gemini-3.8-flash": ["text", "image"], "gemini-3.6-flash": ["text", "image"], "gemini-3.5-flash-lite": ["text", "image"], "gemini-3.7-flash": ["text", "image"] },
+    dashboardUrl: "https://aistudio.google.com/apikey", defaultModel: "gemini-3.5-flash", models: ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.7-flash"],
+    modelContextWindows: { "gemini-4-argon": 1_048_576, "gemini-3.8-flash": 1_048_576, "gemini-3.6-flash": 1_048_576, "gemini-3.5-flash": 1_000_000, "gemini-3.5-flash-lite": 1_048_576, "gemini-3.7-flash": 1_048_576 },
+    modelInputModalities: { "gemini-4-argon": ["text", "image"], "gemini-3.8-flash": ["text", "image"], "gemini-3.6-flash": ["text", "image"], "gemini-3.5-flash-lite": ["text", "image"], "gemini-3.7-flash": ["text", "image"] },
     modelReasoningEfforts: {
       // 3.7 and 3.8 omit `minimal`: Google documents it as a validation error on both model
       // pages, so advertising it hands the user a rung the API rejects. 3.5/3.6 keep theirs —
       // their pages still list it, and this unit has no evidence to change them.
+      // Gemini 4 Argon (GA 2026-10-13): low/medium(default)/high; `minimal` and thinking_budget
+      // return HTTP 400 per ai.google.dev/gemini-api/docs/models/gemini-4-argon.
+      "gemini-4-argon": ["low", "medium", "high"],
       "gemini-3.8-flash": ["low", "medium", "high"],
       "gemini-3.7-flash": ["low", "medium", "high"],
       "gemini-3.6-flash": ["minimal", "low", "medium", "high"],
@@ -1199,7 +1242,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
   { id: "azure-openai", label: "Azure OpenAI", adapter: "azure-openai", baseUrl: "https://{resource}.openai.azure.com/openai", authKind: "key", featured: true, dashboardUrl: "https://portal.azure.com" },
   { id: "ollama", label: "Ollama (local)", adapter: "openai-chat", baseUrl: "http://localhost:11434/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — key usually blank" },
   { id: "vllm", label: "vLLM (local)", adapter: "openai-chat", baseUrl: "http://localhost:8000/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — key usually blank" },
-  { id: "lm-studio", label: "LM Studio (local)", adapter: "openai-chat", baseUrl: "http://localhost:1234/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — no key needed" },
+  { id: "lm-studio", singleLeadingSystemMessage: true, label: "LM Studio (local)", adapter: "openai-chat", baseUrl: "http://localhost:1234/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — no key needed" },
   {
     id: "deepseek",
     label: "DeepSeek",
@@ -1217,17 +1260,18 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // the list only as compatibility aliases so existing saved configs and requests
     // keep validating and routing (they previously mapped to v4-flash; devlog
     // _fin/260710_provider_hardening/002_research_cn.md). The current offerings are
-    // V4.1-Flash — defaultModel and the model-specific wiring below use its live id.
+    // V4.1-Flash and V4 Pro; Flash remains the default.
     // Keep the legacy vision-preview alias; see DEEPSEEK_VISION_PREVIEW_MODEL.
     models: ["deepseek-chat", "deepseek-reasoner", ...DEEPSEEK_NATIVE_THINKING_MODELS, DEEPSEEK_VISION_PREVIEW_MODEL],
-    // V4.1-Flash is the current first-party offering; `deepseek-v4-flash` now routes there
+    // V4.1-Flash is the first-party default; `deepseek-v4-flash` now routes there
     // as a compatibility alias, so a new install should ask for the live id by name.
     defaultModel: "deepseek-flash",
     // Official DeepSeek Codex setup (codex-deepseek-setup.sh) advertises 1,048,576
     // for both V4 models; the older 1,000,000 figure was a rounded approximation.
-    modelContextWindows: { "deepseek-flash": 1_048_576, "deepseek-v4-flash": 1_048_576, [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576 },
+    modelContextWindows: { "deepseek-flash": 1_048_576, "deepseek-v4-flash": 1_048_576, "deepseek-v4-pro": 1_048_576, [DEEPSEEK_VISION_PREVIEW_MODEL]: 1_048_576 },
     modelInputModalities: {
       "deepseek-flash": ["text", "image"],
+      "deepseek-v4-pro": ["text"],
       [DEEPSEEK_VISION_PREVIEW_MODEL]: ["text", "image"],
     },
     // DeepSeek documents both V4 models as native Responses API models adapted for Codex
@@ -1242,6 +1286,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
       // translating them into Responses would add a hop onto our newest upstream path
       // for no gain.
       "deepseek-v4-flash": { wire: "openai-responses", inbound: ["responses"] },
+      "deepseek-v4-pro": { wire: "openai-responses", inbound: ["responses"] },
       // Same Responses contract as the V4 ids it succeeds; without this row the new
       // default would fall back to the provider-wide Chat wire.
       "deepseek-flash": { wire: "openai-responses", inbound: ["responses"] },
@@ -1259,7 +1304,7 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     // devlog/_fin/260807_deepseek_responses_streaming/000_plan.md.
     // Current official streams normally carry a real terminal; retain a narrow grace
     // repair for the historical shape that closes after a complete graph without one.
-    modelResponsesTerminalRepair: { "deepseek-flash": { graceMs: 5_000 }, "deepseek-v4-flash": { graceMs: 5_000 } },
+    modelResponsesTerminalRepair: { "deepseek-flash": { graceMs: 5_000 }, "deepseek-v4-flash": { graceMs: 5_000 }, "deepseek-v4-pro": { graceMs: 5_000 } },
     // DeepSeek's Responses route emits bare UUID item ids, which leave Codex
     // clients stuck on an uncommitted turn (#938). Client-facing only — raw
     // continuation snapshots keep the upstream ids.
@@ -1298,16 +1343,12 @@ export const PROVIDER_REGISTRY_CORE: readonly ProviderRegistryEntry[] = [
     modelReasoningEfforts: Object.fromEntries(DEEPSEEK_NATIVE_THINKING_MODELS.map(id => [id, deepseekThinkingEffortsFor(id)])),
     modelReasoningEffortMap: Object.fromEntries(DEEPSEEK_NATIVE_THINKING_MODELS.map(id => [id, deepseekReasoningMapFor(id)])),
     modelSupportsReasoningSummaries: Object.fromEntries(DEEPSEEK_NATIVE_THINKING_MODELS.map(id => [id, true])),
-    // deepseek-v4-pro is absent from the live sets on purpose (retired upstream, requests
-    // route to V4.1-Flash — see model-seeds.ts), but it stays SELECTABLE in configs that
-    // already carry it, and what serves it is a thinking-mode model. A saved config with
-    // the alias selected would otherwise serialize a bare continuation the upstream 400s
-    // on (#5421). The preserve list governs replay, not advertisement.
-    preserveReasoningContentModels: [...DEEPSEEK_NATIVE_THINKING_MODELS, "deepseek-v4-pro"],
+    // Native thinking models retain assistant reasoning on tool-call continuations (#5421).
+    preserveReasoningContentModels: DEEPSEEK_NATIVE_THINKING_MODELS,
     // #4436: first-party deepseek-flash accepts native images on Chat and Responses.
     // Keep unprobed compatibility aliases on the #88 sidecar path. This must be fixed
     // here: router enrichment unions this list with saved config, so config cannot remove it.
-    noVisionModels: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"],
+    noVisionModels: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash", "deepseek-v4-pro"],
   },
   // llama-3.3-70b was deprecated by Cerebras on 2026-02-16. Evidence: devlog/_plan/260710_provider_hardening/003_research_aggregators.md.
   { id: "cerebras", label: "Cerebras", baseUrl: "https://api.cerebras.ai/v1", adapter: "openai-chat", authKind: "key", dashboardUrl: "https://cloud.cerebras.ai/platform/apikeys", defaultModel: "gpt-oss-120b" },

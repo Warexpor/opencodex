@@ -1,4 +1,5 @@
 import { OAuthCallbackFlow } from "./callback-server";
+import { CHATGPT_CLIENT_ID, CHATGPT_TOKEN_URL, credsFromToken, decodeJwtPayload, extractAccountId, extractEmail } from "./chatgpt-shared";
 import type { OAuthController, OAuthCredentials } from "./types";
 import { generatePKCE } from "./pkce";
 import { classifyChatgptRefreshFailure } from "../codex/chatgpt-refresh-failure";
@@ -27,7 +28,7 @@ const CHATGPT_SUCCESS_BODY_MAX_BYTES = 64 * 1024;
 
 /** One deadline covers headers and body; every settled call detaches its caller. */
 async function chatGptTokenRequest(
-  body: URLSearchParams,
+  body: URLSearchParams | Record<string, string>,
   label: "ChatGPT refresh" | "ChatGPT token exchange",
   options: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<OAuthCredentials> {
@@ -40,10 +41,14 @@ async function chatGptTokenRequest(
   let endpointError: ChatGptTokenError | undefined;
   try {
     controller.signal.throwIfAborted();
+    const isForm = body instanceof URLSearchParams;
     const response = await fetch(TOKEN_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
+      headers: {
+        "Content-Type": isForm ? "application/x-www-form-urlencoded" : "application/json",
+        Accept: "application/json",
+      },
+      body: isForm ? body.toString() : JSON.stringify(body),
       signal: controller.signal,
     });
     const result = await readBoundedResponseBytes(response, {
@@ -102,43 +107,19 @@ function chatGptTokenError(status: number, body: string, label: string): ChatGpt
   );
 }
 
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+/**
+ * The client and token decoding live in a leaf shared with the device grant.
+ * Re-exported so existing import sites keep their public helper surface.
+ */
+export { CHATGPT_CLIENT_ID, CHATGPT_TOKEN_URL, credsFromToken, decodeJwtPayload, extractAccountId, extractEmail };
+const CLIENT_ID = CHATGPT_CLIENT_ID;
 const AUTH_URL = "https://auth.openai.com/oauth/authorize";
-const TOKEN_URL = "https://auth.openai.com/oauth/token";
+const TOKEN_URL = CHATGPT_TOKEN_URL;
 
-/** Shared with the deviceauth grant in `./chatgpt-device`: same public PKCE client. */
-export const CHATGPT_CLIENT_ID = CLIENT_ID;
-export const CHATGPT_TOKEN_URL = TOKEN_URL;
 const SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CALLBACK_PORT = 1455;
 const CALLBACK_PATH = "/auth/callback";
-const ORIGINATOR = "opencodex";
-
-export function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
-  const parts = token.split(".");
-  if (parts.length !== 3 || !parts[1]) return undefined;
-  try {
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
-  } catch {
-    return undefined;
-  }
-}
-
-export function extractAccountId(idToken?: string, accessToken?: string): string | undefined {
-  for (const token of [idToken, accessToken]) {
-    if (!token) continue;
-    const payload = decodeJwtPayload(token);
-    if (!payload) continue;
-    if (typeof payload.chatgpt_account_id === "string") return payload.chatgpt_account_id;
-    const ns = payload["https://api.openai.com/auth"];
-    if (ns && typeof ns === "object" && typeof (ns as Record<string, unknown>).chatgpt_account_id === "string") {
-      return (ns as Record<string, unknown>).chatgpt_account_id as string;
-    }
-    const orgs = payload.organizations;
-    if (Array.isArray(orgs) && orgs[0] && typeof orgs[0].id === "string") return orgs[0].id as string;
-  }
-  return undefined;
-}
+const ORIGINATOR = "codex_cli_rs";
 
 /**
  * Three-way answer to "is this token marked as belonging to the ChatGPT account domain".
@@ -196,16 +177,6 @@ export function inspectChatGptDomainClaim(token: string): ChatGptDomainClaim {
   return accountId ? { kind: "valid", accountId } : { kind: "invalid" };
 }
 
-export function extractEmail(idToken?: string, accessToken?: string): string | undefined {
-  for (const token of [idToken, accessToken]) {
-    if (!token) continue;
-    const payload = decodeJwtPayload(token);
-    if (!payload) continue;
-    if (typeof payload.email === "string") return payload.email.toLowerCase();
-  }
-  return undefined;
-}
-
 /**
  * Identity-agreement view of one token for security-sensitive bindings. `accountId` follows the
  * existing extractAccountId precedence (top-level, then namespaced, then organizations[0]).
@@ -230,37 +201,6 @@ export function extractAccountIdClaims(token?: string): { accountId: string | un
   return {
     accountId: top ?? namespaced ?? org,
     conflict: top !== undefined && namespaced !== undefined && top !== namespaced,
-  };
-}
-
-export function credsFromToken(data: Record<string, unknown>): OAuthCredentials {
-  const idToken = typeof data.id_token === "string" ? data.id_token : undefined;
-  // This parses a response from an external boundary, so the access token is
-  // validated rather than cast. A 200 carrying no access_token would otherwise
-  // resolve a login as successful with an undefined credential, which then gets
-  // silently declined at persistence — a success message and no account.
-  const accessToken = typeof data.access_token === "string" && data.access_token.length > 0
-    ? data.access_token
-    : undefined;
-  if (!accessToken) throw new Error("ChatGPT token response missing access token");
-  const refreshToken = typeof data.refresh_token === "string" ? data.refresh_token : "";
-  // ?? only guards null/undefined; NaN or a string expires_in would otherwise
-  // produce a NaN expiry that never compares as expired, and a negative duration
-  // would stamp an already-past expiry — both block refresh semantics.
-  const expiresIn =
-    typeof data.expires_in === "number" && Number.isFinite(data.expires_in) && data.expires_in >= 0
-      ? data.expires_in
-      : 3600;
-  // The computed timestamp itself must stay finite: Number.MAX_VALUE passes
-  // Number.isFinite but overflows to Infinity once multiplied by 1000.
-  const computedExpires = Date.now() + expiresIn * 1000;
-  const expires = Number.isFinite(computedExpires) ? computedExpires : Date.now() + 3600 * 1000;
-  return {
-    access: accessToken,
-    refresh: refreshToken,
-    expires,
-    accountId: extractAccountId(idToken, accessToken),
-    email: extractEmail(idToken, accessToken),
   };
 }
 
@@ -333,15 +273,13 @@ export async function loginChatGPT(
   return flow.login();
 }
 
-// Note: uses form-urlencoded per OAuth 2.0 spec (RFC 6749 §6).
-// Codex-rs uses JSON for refresh — intentional divergence; both accepted by auth.openai.com.
 export async function refreshChatGPTToken(
   refreshToken: string,
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<OAuthCredentials> {
-  return chatGptTokenRequest(new URLSearchParams({
-    grant_type: "refresh_token",
+  return chatGptTokenRequest({
     client_id: CLIENT_ID,
+    grant_type: "refresh_token",
     refresh_token: refreshToken,
-  }), "ChatGPT refresh", options);
+  }, "ChatGPT refresh", options);
 }

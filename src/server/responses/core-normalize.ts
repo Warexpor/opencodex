@@ -1,3 +1,6 @@
+import { effectiveAzureOutputBudget } from "../../adapters/azure";
+import { normalizeThinkingOptions } from "../../clients/reasoning-controls";
+import { nativeEffortClamp, shouldApplyNativeEffortClamp } from "../../codex/catalog";
 import { sanitizeLogMetadataString } from "../../lib/redact";
 import type { RouteResult } from "../../router";
 import type { InboundWire } from "../../providers/registry";
@@ -14,7 +17,6 @@ import type { RequestLogContext } from "../request-log";
 import type { HandleResponsesOptions } from "./core-options";
 import { prepareEffortNormalization, stripEmptyLadderEffort, supportedLadderFor } from "../effort-policy";
 import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
-import { resolveOpenCodeZenTransport } from "../../providers/opencode-zen-transport";
 import { getOrAllocateRequestSessionLane } from "../request-log-conversation";
 import { shouldPreparePlaintextV2AgentMessages } from "../../responses/plaintext-v2-agent-messages";
 import { hasValidatedActiveReasoningEffort } from "../../responses/parser";
@@ -187,9 +189,9 @@ export async function applyFinalRouteRequestNormalization(args: {
     inboundWire,
     route.staticPolicy,
   );
-  route.provider = resolveOpenCodeZenTransport(resolveOpenCodeGoTransport(wireProvider,
+  route.provider = resolveOpenCodeGoTransport(wireProvider,
     args.claudeGoAffinity ? args.claudeGoAffinity.sessionLane : getOrAllocateRequestSessionLane(req),
-    routedProvider));
+    routedProvider);
   parsed._plaintextV2AgentMessages = shouldPreparePlaintextV2AgentMessages({
     enabled: config.plaintextV2AgentMessages === true,
     inboundWire,
@@ -212,6 +214,16 @@ export async function applyFinalRouteRequestNormalization(args: {
   logCtx.model = virtualModel?.selectedModelId ?? route.modelId;
   logCtx.provider = route.providerName;
   logCtx.spendPoolId = route.providerName;
+  // Admission precedes adapter serialization. Reserve the same explicit output cap
+  // the final destination will send, and recompute from the caller on every fallback.
+  const rawBudget = parsed._rawBody && typeof parsed._rawBody === "object"
+    ? (parsed._rawBody as { max_output_tokens?: unknown }).max_output_tokens : undefined;
+  const outputBudget = effectiveAzureOutputBudget(route.provider,
+    route.provider.adapter === "azure" || route.provider.adapter === "azure-openai"
+      ? rawBudget : parsed.options.maxOutputTokens);
+  if (typeof outputBudget === "number" && outputBudget > 0) {
+    logCtx.spendOutputCeilingTokens = Math.trunc(outputBudget);
+  }
   logCtx.providerAdapter = route.provider.adapter;
   logCtx.routeDecision = route.routeDecision;
   logCtx.policyEligibility = route.policyEligibility;
@@ -331,6 +343,21 @@ export async function applyFinalRouteRequestNormalization(args: {
   }
 
   {
+    // Native passthrough keeps its snapshot-owned effort contract, including saved exclusions.
+    if (!shouldApplyNativeEffortClamp(route.providerName, route.provider, finalSelectedModelId)) {
+      const previousEffort = parsed.options.reasoning;
+      const previousThinkingEnabled = parsed.options.thinkingEnabled;
+      normalizeThinkingOptions(route.provider, route.modelId, parsed.options);
+      const raw = parsed._rawBody as { reasoning?: unknown } | undefined;
+      if (previousEffort !== undefined && parsed.options.reasoning === undefined) {
+        if (raw) raw.reasoning = stripEmptyLadderEffort(raw.reasoning, []);
+      }
+      if (previousThinkingEnabled !== undefined && parsed.options.thinkingEnabled === undefined
+        && raw?.reasoning && typeof raw.reasoning === "object" && !Array.isArray(raw.reasoning)) {
+        delete (raw.reasoning as { enabled?: boolean }).enabled;
+        if (Object.keys(raw.reasoning).length === 0) delete raw.reasoning;
+      }
+    }
     const { applyEffortCap, effortCapAppliesTo, supportedLadderFor } = await import("../effort-policy");
     const surface = collabSurface(parsed);
     if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true)) {
@@ -347,15 +374,17 @@ export async function applyFinalRouteRequestNormalization(args: {
   }
 
   {
-    const { nativeEffortClamp, shouldApplyNativeEffortClamp } = await import("../../codex/catalog");
+    const raw = parsed._rawBody as { reasoning?: { effort?: string } } | undefined;
+    // The parser folds `ultra` to `max` only in options.reasoning; the passthrough adapter
+    // serializes the raw body, so a raw `ultra` must reach the clamp itself (#7590).
+    const rawUltra = raw?.reasoning && typeof raw.reasoning === "object" && raw.reasoning.effort === "ultra";
     const clamped = shouldApplyNativeEffortClamp(route.providerName, route.provider, finalSelectedModelId)
-      ? nativeEffortClamp(route.modelId, parsed.options.reasoning)
+      ? nativeEffortClamp(route.modelId, rawUltra ? "ultra" : parsed.options.reasoning)
       : null;
     if (clamped) {
       parsed.options.reasoning = clamped;
-      const raw = parsed._rawBody as { reasoning?: { effort?: string } } | undefined;
       if (raw?.reasoning && typeof raw.reasoning === "object") raw.reasoning.effort = clamped;
-      logCtx.requestedEffort = `${logCtx.requestedEffort ?? "max"}->${clamped}`;
+      logCtx.requestedEffort = `${logCtx.requestedEffort ?? (rawUltra ? "ultra" : "max")}->${clamped}`;
     }
   }
   // Chat ingress cannot strip effort against a provisional policy pick. Apply the

@@ -3,7 +3,7 @@ import { Window } from "happy-dom";
 import { act } from "react";
 import type { Root } from "react-dom/client";
 
-const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "fetch", "IS_REACT_ACT_ENVIRONMENT"] as const;
+const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "fetch", "crypto", "IS_REACT_ACT_ENVIRONMENT"] as const;
 
 let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
@@ -11,6 +11,9 @@ let container: HTMLElement;
 let root: Root | null = null;
 let mountCount = 0;
 let apiBase = "";
+let reloadFails = false;
+let mirrorStatus = "written";
+let roleRows: Array<{ role: string; model: string | null; effort: string | null; omoJsoncModel: string | null }>;
 let requests: Array<{ method: string; url: string; body: unknown }> = [];
 
 const PROPOSALS = {
@@ -43,21 +46,32 @@ beforeEach(() => {
   mountCount += 1;
   apiBase = `http://ocx-lazycodex-auto-${mountCount}.invalid`;
   requests = [];
+  reloadFails = false;
+  mirrorStatus = "written";
+  roleRows = [
+    { role: "explorer", model: "gpt-5.5", effort: "high", omoJsoncModel: null },
+    { role: "vague", model: null, effort: null, omoJsoncModel: null },
+    { role: "worker", model: null, effort: "high", omoJsoncModel: null },
+  ];
   const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     const method = init?.method ?? "GET";
     if (method !== "GET") requests.push({ method, url, body: JSON.parse(String(init?.body)) });
     if (url.endsWith("/auto-assign")) return json(PROPOSALS);
-    if (method === "PUT") return json({ ok: true, toml: { status: "written" }, omoJsonc: { status: "written" } });
+    if (method === "PUT") {
+      const body = JSON.parse(String(init?.body));
+      const role = url.slice(url.lastIndexOf("/") + 1);
+      roleRows = roleRows.map(row => row.role === role ? { ...row, model: body.model ?? row.model, effort: body.effort === undefined ? row.effort : body.effort } : row);
+      // Like the server, a write without a batch starts one and the response names it.
+      return json({ ok: true, toml: { status: "written" }, omoJsonc: { status: mirrorStatus }, batch: body.batch ?? `server-${requests.length}` });
+    }
     if (url.endsWith("/api/subagent-models")) return json({ available: ["gpt-5.5", "a/small", "a/mid"] });
+    if (url.endsWith("/api/injection-model")) return json({ efforts: ["low", "medium", "high"] });
+    if (reloadFails) return json({ error: "unavailable" }, 503);
     return json({
       lazycodex: { detected: true, pluginEnabled: true, pluginInstalled: true },
       omoJsonc: { state: "present" },
-      roles: [
-        { role: "explorer", model: "gpt-5.5", omoJsoncModel: null },
-        { role: "vague", model: null, omoJsoncModel: null },
-        { role: "worker", model: null, omoJsoncModel: null },
-      ],
+      roles: roleRows,
     });
   }) as typeof fetch;
   Object.defineProperty(globalThis, "fetch", { configurable: true, value: mockFetch });
@@ -133,7 +147,7 @@ test("apply all writes each remaining proposal once and skips unsized roles", as
   await click(button("Apply all"));
   expect(requests.slice(1)).toEqual([
     { method: "PUT", url: `${apiBase}/api/codex-agent-roles/explorer`, body: { model: "a/small", effort: "low" } },
-    { method: "PUT", url: `${apiBase}/api/codex-agent-roles/worker`, body: { model: "a/mid" } },
+    { method: "PUT", url: `${apiBase}/api/codex-agent-roles/worker`, body: { model: "a/mid", batch: "server-2" } },
   ]);
   expect(container.textContent).toContain("Applied 2 of 2 proposals.");
   expect(button("Apply all").disabled).toBe(true);
@@ -152,3 +166,108 @@ test("a proposal that matches the role's current model and effort is shown as al
     PROPOSALS.proposals[0] = { ...PROPOSALS.proposals[0]!, model: "gpt-5.5", effort: "high" };
   }
 });
+
+function roleRow(role: string): HTMLElement {
+  return [...container.querySelectorAll("tbody tr")].find(tr => tr.querySelector("td")?.textContent === role) as HTMLElement;
+}
+
+async function expectEffortOptions(role: string, options: string[]): Promise<void> {
+  const trigger = container.querySelector(`[aria-label="Reasoning effort (${role})"]`) as HTMLButtonElement;
+  await act(async () => { trigger.click(); });
+  expect([...testWindow.document.querySelectorAll('[role="option"]')].map(node => node.textContent)).toEqual(options);
+  await act(async () => { trigger.click(); });
+}
+
+for (const mirrorFails of [false, true]) {
+  test(`a no-ladder proposal retains a pin through failed reloads and mirror retries (mirror fails: ${mirrorFails})`, async () => {
+    await mount();
+    await click(button("Auto-assign"));
+    reloadFails = true;
+    mirrorStatus = mirrorFails ? "write_failed" : "written";
+    await click(button("Apply", proposal("worker")));
+    expect(requests.slice(1)).toEqual([{ method: "PUT", url: `${apiBase}/api/codex-agent-roles/worker`, body: { model: "a/mid" } }]);
+    expect(roleRow("worker").querySelectorAll("td")[1]!.textContent).toBe("a/mid · high");
+    expect(container.textContent).toContain("worker now runs on a/mid · high");
+    await expectEffortOptions("worker", ["Inherit effort", "high", "low", "medium"]);
+    const save = roleRow("worker").querySelector("button.btn-primary") as HTMLButtonElement;
+    expect(save.disabled).toBe(!mirrorFails);
+    if (mirrorFails) {
+      expect(save.textContent).toBe("Retry omo.jsonc");
+      mirrorStatus = "written";
+      await click(save);
+      expect(requests.slice(1).map(r => r.body)).toEqual([{ model: "a/mid" }, { model: "a/mid" }]);
+      expect(roleRow("worker").querySelectorAll("td")[1]!.textContent).toBe("a/mid · high");
+      expect((roleRow("worker").querySelector("button.btn-primary") as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+}
+
+test("Apply all merges both confirmed rows when every reload fails", async () => {
+  await mount();
+  await click(button("Auto-assign"));
+  reloadFails = true;
+  await click(button("Apply all"));
+  expect(requests.slice(1).map(r => r.body)).toEqual([{ model: "a/small", effort: "low" }, { model: "a/mid", batch: "server-2" }]);
+  expect(roleRow("explorer").querySelectorAll("td")[1]!.textContent).toBe("a/small · low");
+  expect(roleRow("worker").querySelectorAll("td")[1]!.textContent).toBe("a/mid · high");
+  await expectEffortOptions("explorer", ["Inherit effort", "low", "medium", "high"]);
+  await expectEffortOptions("worker", ["Inherit effort", "high", "low", "medium"]);
+  for (const role of ["explorer", "worker"]) {
+    expect((roleRow(role).querySelector("button.btn-primary") as HTMLButtonElement).disabled).toBe(true);
+  }
+  expect(button("Apply all").disabled).toBe(true);
+});
+test("applying a no-ladder proposal resends an effort whose omo.jsonc mirror is still pending", async () => {
+  roleRows = roleRows.map(row => row.role === "worker" ? { ...row, model: "gpt-5.5", effort: "high" } : row);
+  mirrorStatus = "write_failed";
+  await mount();
+  const trigger = container.querySelector('[aria-label="Reasoning effort (worker)"]') as HTMLButtonElement;
+  await act(async () => { trigger.click(); });
+  const low = [...testWindow.document.querySelectorAll('[role="option"]')].find(node => node.textContent === "low") as unknown as HTMLElement;
+  await act(async () => { low.click(); });
+  await click(roleRow("worker").querySelector("button.btn-primary") as HTMLButtonElement);
+  mirrorStatus = "written";
+  await click(button("Auto-assign"));
+  await click(button("Apply", proposal("worker")));
+  expect(requests.filter(r => r.method === "PUT").map(r => r.body)).toEqual([
+    { model: "gpt-5.5", effort: "low" },
+    { model: "a/mid", effort: "low" },
+  ]);
+  expect(roleRow("worker").querySelectorAll("td")[1]!.textContent).toBe("a/mid · low");
+  expect((roleRow("worker").querySelector("button.btn-primary") as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("Apply after a failed effort-only mirror on a model-inheriting role carries that effort", async () => {
+  mirrorStatus = "write_failed";
+  await mount();
+  expect(roleRow("worker").querySelectorAll("td")[1]!.textContent).toBe("No model pin · high");
+  const trigger = container.querySelector('[aria-label="Reasoning effort (worker)"]') as HTMLButtonElement;
+  await act(async () => { trigger.click(); });
+  const low = [...testWindow.document.querySelectorAll('[role="option"]')].find(node => node.textContent === "low") as unknown as HTMLElement;
+  await act(async () => { low.click(); });
+  await click(roleRow("worker").querySelector("button.btn-primary") as HTMLButtonElement);
+  expect(roleRow("worker").querySelectorAll("td")[1]!.textContent).toBe("No model pin · low");
+  mirrorStatus = "written";
+  await click(button("Auto-assign"));
+  await click(button("Apply", proposal("worker")));
+  expect(requests.filter(r => r.method === "PUT").map(r => r.body)).toEqual([
+    { effort: "low" },
+    { model: "a/mid", effort: "low" },
+  ]);
+  expect(roleRow("worker").querySelectorAll("td")[1]!.textContent).toBe("a/mid · low");
+});
+
+// A dashboard opened over plain HTTP on the LAN is not a secure context: randomUUID is missing or throws.
+for (const availability of ["absent", "throws"] as const) {
+  test(`Apply all writes one batch and unlocks the panel when randomUUID is ${availability}`, async () => {
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: availability === "absent" ? {}
+      : { randomUUID: () => { throw new Error("insecure context"); } } });
+    await mount();
+    await click(button("Auto-assign"));
+    await click(button("Apply all"));
+    const batches = requests.slice(1).map(r => (r.body as { batch?: string }).batch);
+    expect(batches).toEqual([undefined, "server-2"]);
+    expect(container.textContent).toContain("Applied 2 of 2 proposals.");
+    expect(button("Auto-assign").disabled).toBe(false);
+  });
+}

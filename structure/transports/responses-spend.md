@@ -11,6 +11,11 @@ That reservation occupies the shared ceiling immediately; it is not a completed 
 `comboInitialSend` hands only that child's single-use permit to `request-send-budget.ts`.
 `initialSendAllowance` includes that one prepaid send while `remainingBaseSends` keeps every
 booking spent. Other pending external bookings never become this child's free headroom.
+Generic Combo rebuilds use the same shared allowance even without an opt-in retry or spend
+policy. Their reporter settles at physical executor admission after pacing, using the exact
+prepaid recovery permit when present; unsent repairs and credential hops remain refundable.
+Anthropic pool rotations, including direct requests, reserve an `auth-recovery` hop against the
+shared allowance and may use its existing final-recovery reserve; account-count limits still apply.
 Configured transient totals subtract an owner-local counter updated by physical receipts, adapter
 observers and retry-helper reports, not shared-ledger deltas. Earlier Combo targets, later bookings
 by other owners and the child's unsent booking do not consume that total; the shared ceiling and
@@ -165,10 +170,26 @@ target's own recovery decision, while the physical-send total is what binds ever
 
 ## Durable spend reservations
 
+Azure's opt-in `minMaxOutputTokens` is resolved by `effectiveAzureOutputBudget` in
+`src/adapters/azure.ts` for both serialization and spend admission. Final Responses route
+normalization reserves the effective explicit output cap; Combo prepayment computes it for
+each concrete target before booking. Neither path changes the caller-owned cap or carries
+one target's floor to the next. `tests/responses/responses-spend-anchor.test.ts` checks
+both Azure aliases, direct and Combo dispatch, refusal below the floor and wire-time reservation.
+
 The request's send budget bounds how many times it may reach upstream; the spend ledger bounds
 what those sends may cost, and it is the only bound here that survives a restart. Its production
 caller is `request-spend.ts`, installed on the execution budget at genuine ingress in `core.ts`
 and parked on the log context so `addFinalRequestLog` can settle it. Native Chat installs the same tracker before its independent physical-send ladder and charges it immediately before each dispatch, so that fast path cannot bypass root, identity or provider-pool ceilings.
+
+The tracker settles with `logCtx.usage`, and so does the row. A combo copies its child's log
+context into that one only when the child commits, while the bridge binds the adapter usage later,
+at the terminal frame. `executeComboResponses` therefore passes each child `onBridgeUsageBound`
+(`core-options.ts`), which `bindKeyUsageFromBridge` calls after it binds. After the child commits,
+the combo sets `usageFromBridge` and `usage` on its own context; a binding that came earlier waits
+for the commit, and a child that fails or never commits forwards nothing. Without that, the row
+and the settlement would read the usage back off the bridged Responses wire, which carries no
+`providerCredits` and derives its input count from the context checkpoint.
 
 Unconfigured requests preserve the legacy counter observer: reservations increment the send
 counter, refunds decrement it, and named reports reconcile prepaid sends. Enforced requests use

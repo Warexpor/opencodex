@@ -20,12 +20,17 @@
  * targeting it is the caller's explicit act.
  */
 import { homedir } from "node:os";
+import { gentleShellPaths } from "./gentle-shell-path";
+import { absoluteClientPath, ClientPathError, isAbsoluteClientPath, piAgentDir } from "./client-path";
+export { ClientPathError, piAgentDir } from "./client-path";
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { shouldInjectApiAuthHeader, standaloneCodexRoutingTarget } from "../codex/inject";
 import { FORMAT_MEDIA_TYPE, serializeDocument, type ConfigFormat } from "../integrations/serialize";
+import { fileIO } from "../integrations/config-io";
 import { canonicalizeReasoningEfforts } from "../reasoning-effort";
 import { expandFastExportModels } from "./config-export/fast-models";
+import { namedExportContext } from "./config-export/alias-selectors";
 import { probeHostname } from "../server/proxy-liveness";
 import type { OcxConfig } from "../types";
 
@@ -81,6 +86,11 @@ import {
 
 export type { CommandCodeGeneratedConfig, CommandCodeModelEntry, CommandCodeProviderBlock };
 export { buildCommandCodeClientConfig, summarizeCommandCode, buildCommandCodeContribution, commandCodeProviderRoot };
+import { agentConfigPath, buildQoderCnClientConfig, buildQoderCnContribution, buildWorkbuddyClientConfig, buildWorkbuddyContribution, summarizeWorkbuddy, workbuddyApplyRefusal } from "./config-export/agent-clients";
+import { buildQoderClientConfig, summarizeQoder, buildQoderContribution, qoderConfigPath } from "./config-export/qoder";
+export { buildQoderClientConfig, qoderConfigPath, qoderHomeDir, type QoderGeneratedConfig } from "./config-export/qoder";
+import { buildT3CodeClientConfig, summarizeT3Code, buildT3CodeContribution, t3codeApplyRefusal, t3codeConfigPath } from "./config-export/t3code";
+export { buildT3CodeClientConfig, t3codeConfigPath, t3codeHomeDir, type T3CodeGeneratedConfig } from "./config-export/t3code";
 
 
 
@@ -126,6 +136,18 @@ export interface OpencodeProviderConnection {
   baseURL: string;
   apiKey?: string;
   headers?: Record<string, string>;
+  /**
+   * opencode's own client-side wait for the proxy's first response header, in ms, or `false`
+   * to disable it. Emitted only when `opencodeClientExport.headerTimeoutMs` is set. opencode's
+   * default is 300000 (5 min); a slow local model's prompt prefill behind a non-streaming turn
+   * can exceed it, so the proxy sends no bytes and opencode's header wait fires ("Timed out
+   * waiting for response headers").
+   */
+  headerTimeout?: number | false;
+  /** opencode's wait between streamed response chunks (ms) or `false`; emitted from `chunkTimeoutMs`. */
+  chunkTimeout?: number | false;
+  /** opencode's whole-request bound (ms) or `false`; emitted from `timeoutMs`. opencode has no default. */
+  timeout?: number | false;
 }
 
 /** opencode V1 provider block: `npm` + `options`. */
@@ -210,21 +232,6 @@ function ompProfileName(env: OpencodeLaunchEnv): string | undefined {
   return profile;
 }
 
-/**
- * Pi resolves its agent directory from `PI_CODING_AGENT_DIR`, falling back to
- * `~/.pi/agent`. `ompAgentDir` below already reads that variable — OMP is a Pi
- * derivative — so Pi's own resolver honoring it is what makes the two agree
- * rather than a new claim about Pi's contract.
- *
- * A relative override is refused for the same reason MCode's and ZCode's are: a
- * background proxy and a foreground client can have different working
- * directories, and would otherwise disagree about which file is named.
- */
-export function piAgentDir(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
-  const override = env.PI_CODING_AGENT_DIR?.trim();
-  if (override) return absoluteClientPath(override, home, "PI_CODING_AGENT_DIR");
-  return join(home, ".pi", "agent");
-}
 
 /** Pi's canonical custom-provider catalog. */
 export function piConfigPath(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
@@ -284,35 +291,6 @@ export function hermesHomeDir(env: OpencodeLaunchEnv = process.env, home: string
 
 export function hermesConfigPath(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
   return join(hermesHomeDir(env, home), "config.yaml");
-}
-
-/**
- * Expand `~` against the effective home; REFUSE anything still relative.
- *
- * A first attempt at this called `resolve()` and claimed the path would "mean
- * the same thing next time". It does not: `resolve()` only anchors the current
- * invocation, so applying from one directory and disabling from another still
- * resolved two different files — the second reported "not applied" and left
- * the managed block behind with nothing claiming it.
- *
- * There is no honest way to recover the other process's cwd, so a relative
- * selector is refused at the boundary instead of being silently anchored to
- * whichever directory we happened to start in. A `~` path IS stable, because
- * it anchors to the effective home rather than the cwd.
- */
-export class ClientPathError extends Error {}
-
-function absoluteClientPath(raw: string, home: string, variable: string): string {
-  const trimmed = raw.trim();
-  if (trimmed === "~") return home;
-  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) return join(home, trimmed.slice(2));
-  if (!isAbsolute(trimmed)) {
-    throw new ClientPathError(
-      `${variable} must be an absolute path or start with ~; "${trimmed}" depends on the working directory, `
-      + "so opencodex and the client would disagree about which file it names.",
-    );
-  }
-  return trimmed;
 }
 
 /**
@@ -432,10 +410,10 @@ export function dshHomeDir(env: OpencodeLaunchEnv = process.env, home: string = 
   if (raw === undefined || raw.trim().length === 0) return join(home, ".dsh");
   if (raw === "~") return home;
   if (raw.startsWith("~/") || raw.startsWith("~\\")) return join(home, raw.slice(2));
-  if (!isAbsolute(raw)) {
+  if (!isAbsoluteClientPath(raw)) {
     throw new ClientPathError(
       `DSH_HOME must be an absolute path or start with ~; "${raw}" depends on the working directory, `
-      + "so opencodex and DSH would disagree about which settings file it names.",
+      + "so opencodex and DSH would disagree about which settings file it names. Use a drive letter or UNC share on Windows.",
     );
   }
   // DSH calls node:path.resolve after tilde expansion. Preserve the raw value
@@ -470,20 +448,49 @@ export function mcodeConfigPath(env: OpencodeLaunchEnv = process.env, home: stri
   return join(mcodeHomeDir(env, home), "config.yaml");
 }
 
-/**
- * ZCode (Z.ai's desktop client) keeps everything under `~/.zcode`; custom
- * providers live in `v2/config.json`. `ZCODE_DATA_DIR` mirrors the other
- * clients' override convention; relative overrides are refused for the same
- * reason as MCode's.
- */
-export function zcodeHomeDir(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
-  const override = env.ZCODE_DATA_DIR?.trim();
-  if (override) return absoluteClientPath(override, home, "ZCODE_DATA_DIR");
-  return join(home, ".zcode");
+/** Bootstrap settings always stay at the default home, even after relocation. */
+export type ZcodePathIO = {
+  readText: (path: string) => { kind: "text"; text: string } | { kind: "missing" } | { kind: "failed"; code?: string };
+};
+const zcodePathIO: ZcodePathIO = {
+  /** Shares the integration reader's four-MiB limit and regular-file-only bootstrap contract. */
+  readText: path => fileIO().readText(path),
+};
+export class ZcodeSettingsPathError extends ClientPathError {}
+
+export function zcodeBootstrapSettingsPath(home: string = homedir()): string {
+  return join(home, ".zcode", "v2", "setting.json");
 }
 
-export function zcodeConfigPath(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
-  return join(zcodeHomeDir(env, home), "v2", "config.json");
+/** The pre-relocation path is retained solely to recognize historical ownership. */
+export function zcodeLegacyHomeDir(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
+  const override = env.ZCODE_DATA_DIR?.trim();
+  return override ? absoluteClientPath(override, home, "ZCODE_DATA_DIR") : join(home, ".zcode");
+}
+
+/** ZCODE_DATA_DIR names the .zcode root; dataBaseDir names its parent. */
+export function zcodeHomeDir(env: OpencodeLaunchEnv = process.env, home: string = homedir(), io: ZcodePathIO = zcodePathIO): string {
+  if (env.ZCODE_DATA_DIR?.trim()) return zcodeLegacyHomeDir(env, home);
+  const bootstrap = zcodeBootstrapSettingsPath(home);
+  const read = io.readText(bootstrap);
+  if (read.kind === "missing") return join(home, ".zcode");
+  const unknown = () => new ZcodeSettingsPathError(
+    `ZCode's active data root is unknown: ${bootstrap} must be readable JSON with an absolute dataBaseDir (or no dataBaseDir). Repair the bootstrap setting before enabling or refreshing; no legacy provider will be applied.`,
+  );
+  if (read.kind !== "text") throw unknown();
+  let settings: unknown;
+  try { settings = JSON.parse(read.text); } catch { throw unknown(); }
+  if (settings === null || typeof settings !== "object" || Array.isArray(settings)) throw unknown();
+  const base = (settings as Record<string, unknown>).dataBaseDir;
+  if (base === undefined) return join(home, ".zcode");
+  // Match the native path's value, without cwd or tilde expansion. The native
+  // ZCODE_DATA_BASE_DIR selector is not an alias for our ZCODE_DATA_DIR.
+  if (typeof base !== "string" || !isAbsoluteClientPath(base) || base.includes("\0")) throw unknown();
+  return join(base, ".zcode");
+}
+
+export function zcodeConfigPath(env: OpencodeLaunchEnv = process.env, home: string = homedir(), io?: ZcodePathIO): string {
+  return join(zcodeHomeDir(env, home, io), "v2", "config.json");
 }
 
 /**
@@ -500,7 +507,7 @@ export function zcodeConfigPath(env: OpencodeLaunchEnv = process.env, home: stri
 export function commandCodeUserHome(env: OpencodeLaunchEnv = process.env, home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
   if (platform !== "win32" || home !== homedir()) return home;
   const value = env.HOME ?? env.USERPROFILE;
-  return typeof value === "string" && value.trim() && win32.isAbsolute(value) ? value : home;
+  return typeof value === "string" && value.trim() && isAbsoluteClientPath(value, platform) ? value : home;
 }
 
 /**
@@ -532,8 +539,7 @@ export function commandCodeConfigPath(env: OpencodeLaunchEnv = process.env, home
  * an install that has ever run, the import has already happened and never runs
  * again — every later write to `v2/config.json` is read by nobody (#5348).
  *
- * This project does not write this file; it names it so the integration can
- * tell whether its own write can still reach the client. The env override is
+ * The integration writes this store through its existing schema-aware writer. The env override is
  * ZCode's own (`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`), so an operator who
  * relocated the store is measured against the file their client actually opens
  * rather than the default location. A relative override is refused for the same
@@ -541,10 +547,10 @@ export function commandCodeConfigPath(env: OpencodeLaunchEnv = process.env, home
  * which file it names, and here that disagreement decides whether an apply is
  * reported as effective.
  */
-export function zcodeProviderStorePath(env: OpencodeLaunchEnv = process.env, home: string = homedir()): string {
+export function zcodeProviderStorePath(env: OpencodeLaunchEnv = process.env, home: string = homedir(), io?: ZcodePathIO): string {
   const override = env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE?.trim();
   if (override) return absoluteClientPath(override, home, "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE");
-  return join(zcodeHomeDir(env, home), "v2", "provider_config.json");
+  return join(zcodeHomeDir(env, home, io), "v2", "provider_config.json");
 }
 
 /**
@@ -719,6 +725,17 @@ export function raycastConfigPath(env: OpencodeLaunchEnv = process.env, home: st
 /** Endpoint plus admission, identical for the V1 `options` and V2 `settings` field. */
 function opencodeProviderConnection(baseURL: string, config: OcxConfig): OpencodeProviderConnection {
   const options: OpencodeProviderConnection = { baseURL };
+  // Opt-in opencode-side timeout overrides. Omitted by default so opencode keeps its native
+  // header/chunk waits for every upstream routed through the proxy (current V2 defaults the
+  // header wait to 5 min and the longer chunk wait to 15 min, but this repo pins no opencode
+  // release); a user fronting a slow local model sets these to extend or disable the wait that
+  // otherwise cuts a long prefill.
+  const timeouts = config.opencodeClientExport;
+  if (timeouts) {
+    if (timeouts.headerTimeoutMs !== undefined) options.headerTimeout = timeouts.headerTimeoutMs;
+    if (timeouts.chunkTimeoutMs !== undefined) options.chunkTimeout = timeouts.chunkTimeoutMs;
+    if (timeouts.timeoutMs !== undefined) options.timeout = timeouts.timeoutMs;
+  }
   // Non-loopback binds accept proxy admission only via x-opencodex-api-key so Authorization
   // stays free for Codex Direct upstream credentials when applicable.
   if (shouldInjectApiAuthHeader(config)) {
@@ -889,6 +906,8 @@ interface PiExportOptions {
    * states it rather than leaving each user to hand-edit a block the next export rewrites.
    */
   foldDeveloperRole?: boolean;
+  /** Provider dialect; omitted writes `PI_API_DIALECT`. */
+  api?: "openai-completions" | "openai-responses";
 }
 
 export interface PiGeneratedConfig {
@@ -1068,7 +1087,7 @@ function buildPiClientConfig(ctx: ExportContext, options: PiExportOptions = {}):
     providers: {
       [OPENCODE_PROVIDER_ID]: {
         baseUrl: ctx.baseUrl,
-        api: PI_API_DIALECT,
+        api: options.api ?? PI_API_DIALECT,
         apiKey: LOOPBACK_API_KEY_PLACEHOLDER,
         ...(Object.keys(compat).length > 0 ? { compat } : {}),
         models,
@@ -1374,10 +1393,19 @@ function buildAsideContribution(ctx: ExportContext): ManagedContribution {
  * are consistent; passing it on only one would make `ocx export --client omo`
  * emit a `compat` block while enable and refresh wrote a file without it, and
  * the two would drift apart at the first refresh.
+ *
+ * The same rule covers the opt-in `omoClientExport.api` dialect (#7431): both paths read it from
+ * the live config, so a refresh keeps the Responses dialect instead of reverting it to Chat.
  */
 function buildOmoContribution(ctx: ExportContext): ManagedContribution {
-  const doc = buildPiClientConfig(ctx, PI_EXPORT_OPTIONS);
+  const doc = buildPiClientConfig(ctx, omoExportOptions(ctx));
   return singleFragment("omo", ["providers", OPENCODE_PROVIDER_ID], doc.providers[OPENCODE_PROVIDER_ID]);
+}
+
+function omoExportOptions(ctx: ExportContext): PiExportOptions {
+  return ctx.config?.omoClientExport?.api === "openai-responses"
+    ? { ...PI_EXPORT_OPTIONS, api: "openai-responses" }
+    : PI_EXPORT_OPTIONS;
 }
 
 /** Cline's shared SDK store; command-local --config must be mirrored by the env override. */
@@ -1399,6 +1427,29 @@ export function clineSettingsDir(env: OpencodeLaunchEnv = process.env, home: str
 }
 
 export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
+  qoder: {
+    id: "qoder",
+    filename: "qoder-settings.json",
+    destination: env => qoderConfigPath(env),
+    apiKeyEnv: "",
+    exportHint: "Qoder reads a non-secret placeholder from settings.json; loopback needs no key.",
+    build: buildQoderClientConfig,
+    format: "json",
+    summarize: summarizeQoder,
+    buildContribution: buildQoderContribution,
+    loopbackOnly: true,
+  },
+  "qoder-cn": {
+    id: "qoder-cn", filename: "qoder-cn-settings.json", destination: env => agentConfigPath("qoder-cn", env),
+    apiKeyEnv: "", exportHint: "Qoder CN uses a non-secret loopback placeholder.", format: "json",
+    build: buildQoderCnClientConfig, summarize: summarizeQoder, buildContribution: buildQoderCnContribution, loopbackOnly: true,
+  },
+  ...Object.fromEntries((["workbuddy", "workbuddy-ai"] as const).map(id => [id, {
+    id, filename: `${id}-models.json`, destination: (env: NodeJS.ProcessEnv) => agentConfigPath(id, env),
+    apiKeyEnv: "", exportHint: "WorkBuddy uses a non-secret loopback placeholder.", format: "json" as const,
+    build: buildWorkbuddyClientConfig, summarize: summarizeWorkbuddy, validateApply: workbuddyApplyRefusal,
+    buildContribution: (ctx: ExportContext) => buildWorkbuddyContribution(id, ctx), loopbackOnly: true,
+  }])) as Record<"workbuddy" | "workbuddy-ai", ExportClientSpec>,
   opencode: {
     id: "opencode",
     filename: "opencode.json",
@@ -1601,11 +1652,8 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     loopbackOnly: true,
   },
   /*
-   * Appended rather than filed beside the other Pi-family clients on purpose.
-   * `EXPORT_CLIENT_IDS` is `Object.keys(EXPORT_CLIENTS)`, so this object's
-   * insertion order IS the public order, and three tests assert it exactly. The
-   * existing sequence is landing order — `pi` second, `prime` eleventh — not a
-   * grouping, so appending is the edit that leaves the other thirteen alone.
+   * The shared client roster preserves public landing order, not family grouping.
+   * Keep this registry in the same order so its iteration agrees with the roster.
    */
   omo: {
     id: "omo",
@@ -1615,7 +1663,7 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     destination: env => omoConfigPath(env),
     apiKeyEnv: "",
     exportHint: "omo reads a non-secret placeholder from models.json; loopback needs no key.",
-    build: ctx => buildPiClientConfig(ctx, PI_EXPORT_OPTIONS),
+    build: ctx => buildPiClientConfig(ctx, omoExportOptions(ctx)),
     format: "json",
     summarize: summarizePi,
     buildContribution: buildOmoContribution,
@@ -1668,9 +1716,37 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     buildContribution: buildDroidContribution,
     loopbackOnly: true,
   },
+  "gentle-shell": {
+    id: "gentle-shell",
+    filename: "gentle-shell-models.json",
+    destination: env => gentleShellPaths(env).configPath,
+    apiKeyEnv: "",
+    exportHint: "Gentle Shell uses its persistent selected home; restart the shell to load the catalog. Link/shared homes use the Pi integration.",
+    build: ctx => buildPiClientConfig(ctx, PI_EXPORT_OPTIONS),
+    format: "json",
+    summarize: summarizePi,
+    buildContribution: ctx => {
+      const doc = buildPiClientConfig(ctx, PI_EXPORT_OPTIONS);
+      return singleFragment("gentle-shell", ["providers", OPENCODE_PROVIDER_ID], doc.providers[OPENCODE_PROVIDER_ID]);
+    },
+    loopbackOnly: true,
+  },
+  t3code: {
+    id: "t3code",
+    filename: "t3code-settings.json",
+    destination: env => t3codeConfigPath(env),
+    apiKeyEnv: "",
+    exportHint: "Merge providerInstances.opencodex into T3 Code's settings.json; it reloads the file. Loopback needs no key.",
+    build: buildT3CodeClientConfig,
+    format: "json",
+    summarize: summarizeT3Code,
+    validateApply: t3codeApplyRefusal,
+    buildContribution: buildT3CodeContribution,
+    loopbackOnly: true,
+  },
 };
 
-export const EXPORT_CLIENT_IDS: readonly ExportClientId[] = Object.keys(EXPORT_CLIENTS) as ExportClientId[];
+export { EXPORT_CLIENT_IDS } from "./client-ids";
 
 export function isExportClientId(value: string): value is ExportClientId {
   return Object.prototype.hasOwnProperty.call(EXPORT_CLIENTS, value);
@@ -1678,7 +1754,7 @@ export function isExportClientId(value: string): value is ExportClientId {
 
 /** Single entry point every export surface calls. */
 export function buildClientConfig(client: ExportClientId, ctx: ExportContext): unknown {
-  return EXPORT_CLIENTS[client].build(ctx);
+  return EXPORT_CLIENTS[client].build(namedExportContext(client, ctx));
 }
 
 /**
@@ -1692,7 +1768,7 @@ export function buildClientConfigText(
   ctx: ExportContext,
 ): { document: unknown; text: string; format: ConfigFormat; mediaType: string } {
   const spec = EXPORT_CLIENTS[client];
-  const document = spec.build(ctx);
+  const document = spec.build(namedExportContext(client, ctx));
   return {
     document,
     text: serializeDocument(document, spec.format),
@@ -1703,5 +1779,5 @@ export function buildClientConfigText(
 
 /** The fragments opencodex owns in a client's config (writer-side). */
 export function buildClientContribution(client: ExportClientId, ctx: ExportContext): ManagedContribution {
-  return EXPORT_CLIENTS[client].buildContribution(ctx);
+  return EXPORT_CLIENTS[client].buildContribution(namedExportContext(client, ctx));
 }

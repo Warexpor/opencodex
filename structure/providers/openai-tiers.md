@@ -316,6 +316,8 @@ payloads cannot clear cooldowns, actual request refusals still drive cooldown/fa
 default-on main-account hard lock retains its separate local admission policy. Registration
 warmup remains conservative and does not spend paid credits to validate an exhausted account.
 
+Stored-account refusals in `src/codex/auth-context.ts` preserve the included-window `resetAt`. For opted-in accounts with stale, missing or incomplete credits, `src/codex/pool-credit-policy.ts` supplies a retry hint at the earlier of that reset and the 300-second base cadence from `src/codex/quota-query-backoff.ts`; the latest live account-wide or selected-scope cooldown takes precedence, without importing unrelated model-group holds. Numeric and HTTP-date Retry-After input retains the existing 24-hour parser ceiling.
+HTTP remains 429 and admission stays closed. Formatting never triggers a query, clears cooldown or switches accounts; query pacing remains independent. Opt-out, legacy null, known spending/overage vetoes and finite nonpositive balances without unlimited entitlement retain reset-bound advice as evidence ages. Parser-proven unavailable null carries `creditObservationUnavailable: true` through merges and persistence; replacement clears that provenance. It changes retry advice only and never authorizes spending. The same live-policy classification applies after token preparation, at materialization/dispatch and through `src/providers/openai-sidecar-credit.ts`. Main policy and ordinary upstream 429 formatting are unchanged. Coverage: `tests/codex-integration/codex-credit-retry-after.test.ts` and `tests/codex-integration/codex-credit-scoped-retry.test.ts`.
 For an opted-in, unpaused main account with a currently full usage window, the existing
 `src/codex/auth-api/pool-mode-gate.ts` recovery sweep renews credit observations from three minutes
 of age, leaving time for token preparation before the five-minute freshness limit. Missing, zero,
@@ -334,7 +336,8 @@ identity retries: WHAM success and terminal 401/403 responses never set or clear
 this mode. Native token preparation also preserves the traffic quarantine. Other callers retain
 the existing auth behavior. Failed or incomplete observations never renew the credit clock;
 refreshing usage does not redeem reset credits or validate pending accounts through inference.
-Coverage: `tests/codex-integration/main-account-credit-renewal.test.ts`.
+For keyring-only main, the exact owned token is handed from exclusive preparation to the shared WHAM read with home, identity, credential-generation and bearer checks; no second RPC runs under the shared claim. Stale or copied handoffs and late responses cannot replace quota or revoke a newer login's quarantine.
+Coverage: `tests/codex-integration/main-account-credit-renewal.test.ts`. Stored accounts, including explicit namespace targets in Direct mode, use the separate [pool credit renewal](pool-credit-renewal.md) contract; their fresh spendable-evidence requirement is identical.
 
 Credit parsing, expiry, partial updates and reset-ticket separation are covered in
 `tests/codex-integration/codex-quota-parser-parity.test.ts`; selection and bulk-pause behavior
@@ -366,6 +369,10 @@ Regression coverage lives in `tests/codex-integration/codex-quota-parser-parity.
 `tests/codex-integration/main-account-hard-lock-policy.test.ts`,
 `tests/usage/quota-reset-observation.test.ts`, and `tests/usage/quota-reset-seen-store.test.ts`.
 
+Codex pool display capacity in `src/providers/codex-capacity.ts` calibrates the observed Business Premium plan
+`self_serve_business_prolite` at five Standard-seat units. This estimate does not drive routing or create a
+missing five-hour window; unknown plans keep the conservative baseline and are counted in `unknownPlanAccounts`. The same weights (`codexCapacityWeight`) weight the Codex `pooled` windows of [`GET /api/quota-pool`](../quota-pool.md#pooled-windows).
+
 `codexMainAccountHardLock` is a local admission policy that is **on by default** since #5694, at
 short 90% and long `MAIN_ACCOUNT_HARD_LOCK_PERCENT` = 98%, overridden by ordered integer
 `codexMainAccountHardLockThresholds` in 80..100. The 5h/short and weekly windows each govern on
@@ -378,9 +385,13 @@ It blocks newly admitted identity-matched main-account requests. Pool alternativ
 explicit main selection and stored Direct substitution do not override it. It neither pauses the
 account nor clears upstream cooldown/reauth state, and management quota refresh remains available.
 Fresh valid usage below the effective threshold, including 0%, or validated WHAM absence retires a measured short block;
-passing a reset timestamp alone does not. The minute sweep waits locally until the latest known blocking reset;
-when no future reset is known or reads remain blocked, main recovery uses the same capped
-5/10/20/40/60-minute delay calculation as usage-query failures. Skipped ticks do not extend it;
+passing a reset timestamp alone does not. A future known reset is a scheduling hint (#7312): recovery
+arms one base delay the first time an identity/credential sees the hold (including a hold that appears
+during token preparation), then reads WHAM metadata on the same capped 5/10/20/40/60-minute delay
+calculation as usage-query failures. The due time is pulled in to the latest known reset, including one
+that moved earlier or just passed, but hold reads stay at least one base interval apart; a nonterminal
+401/403 retry does not re-arm the first-hold delay. An early reset redeemed elsewhere is thus learned
+without inference or reset-credit use. A paused or needs-reauth main gets no hold rechecks. Skipped ticks do not extend the delay;
 the physical bearer is reconciled before checking the delay, and late results cannot charge
 a replacement credential. A longer valid Retry-After from any main usage reader is checked for the
 current credential before the recovery worker takes a profile lease or prepares a token; a replacement
@@ -414,22 +425,26 @@ hard-lock tests registered in `scripts/test-layout/layout.json`, including
 
 A single fresh valid WHAM response with a measured long primary, or an explicitly null primary and
 measured secondary that supplies parsed weekly usage, can replace an obsolete short-window tuple.
-Secondary and tertiary must each be explicitly null or explicitly long with a valid usage reading.
+Secondary must be explicitly null or explicitly long with a valid usage reading. Tertiary follows
+the same rule when present; a two-window response may omit it only with `rate_limit.allowed === true`.
 Long means **at least 24 hours**, matching the parser's short/long discriminator; a one-day primary
 qualifies, not only a seven-day or monthly window. The policy trusts that one reported topology;
 it does not require repeated observations or independently confirm upstream window completeness.
-Any omitted window field, an unreadable long window, an unknown duration, partial headers, or invalid usage
+An omitted primary/secondary, omitted tertiary without that verdict, unreadable long window, unknown duration, partial headers, or invalid usage
 cannot prove that the short window disappeared. All-null credits-only and tertiary-only Go/Free responses remain insufficient. Replacement proof belongs only to that observation and is never persisted;
 the resulting weekly/monthly window still blocks at its long threshold (98% by default). This prevents old short-window exhaustion
-from surviving indefinitely on a now weekly/monthly account. Coverage lives in
+from surviving indefinitely on a now weekly/monthly account. A live main writer applies that same
+retirement proof to the display/rotation cache, so account selection cannot keep refusing the
+recovered main account on its old short tuple. Pool accounts get the same proof from a valid complete WHAM probe (#7961): `poolWhamPolicyObservation` marks the observation from its window topology only, so a Plus to Pro upgrade cannot keep a stored pool account on the old plan's 5-hour tuple, while partial WHAM, invalid or unparseable readings, an explicit `allowed: false` verdict and response headers keep carrying it. A pool probe retires the tuple only with a live captured pool writer for that account and credential generation, the same proof its history write needs; a missing, stale or other-account writer keeps the tuple. The login usage read marks its observation the same way, but reauthentication clears the row before writing and creation refuses existing ids, so it has nothing to retire. Main-only monthly filtering is not applied to pool observations, and a main observation without a live main writer still carries its tuple. Coverage lives in `tests/codex-integration/codex-credits-probes.test.ts` (pool),
 `tests/codex-integration/main-quota-evidence-validation.test.ts`,
 `tests/codex-integration/main-account-hard-lock-retirement.test.ts`,
 `tests/codex-integration/main-quota-provenance.test.ts`, and
-`tests/codex-integration/main-account-hard-lock-recovery.test.ts`.
+`tests/codex-integration/main-account-hard-lock-recovery.test.ts`; request admission without credit
+consent is covered by `tests/codex-integration/main-account-credit-renewal.test.ts`.
 
 The policy reads a separately retained identity-tagged quota snapshot, so the legacy rotation
 cache's six-hour expiry does not silently release a known block. A confirmed account transition
-invalidates old evidence. Request-owned bearers are matched only against a credential and effective
+invalidates old evidence, including an account change verified through [the owned Codex RPC](openai-accounts.md#native-main-refresh-ownership). A valid persisted policy tag for another account also retires the legacy main selection quota at the first owned observation after restart; same-account and untagged quota remain. Request-owned bearers are matched only against a credential and effective
 workspace already observed under native ownership; an unrelated or unmatched keyring credential
 is not attributed to stored main and introduces no physical-main read. Credential equality tags
 remain process-local and never enter disk, logs, or management DTOs.
@@ -506,6 +521,12 @@ A manual activation pins its account and lowers the tier ceiling to that account
 is released by drain, exclusion, deletion, an explicit failover/promotion away, and any write to
 `codexAccountPriorities` — a pin and an order are both the operator naming an account to use, so the
 newer statement wins. Ordinary round-robin movement inside the capped tier does not release it.
+`PUT /api/codex-auth/active` with a null id is the explicit release, and a release is not a
+selection: it clears the pin and the stored active id, unwinds the steering a selection planted
+(one-shot manual preference, runtime cursor, and the rotation seeds on the shared and independent
+quota-scope rings), and leaves bound threads on their captured account and quota-avoidance health
+standing — nothing was named, so nothing new applies immediately, which is why the route reports
+`appliesImmediately: false` there. A release may include `expectedPinnedAccountId`: the lock-protected persisted mutation checks that exact pin again before publication, returning `account_pin_changed` if a newer pin replaced it. Callers that omit the precondition retain the explicit global release contract.
 Without that last rule a pin made before any order existed, which is just an ordinary account switch,
 would outrank every order set afterwards for as long as the account kept headroom.
 

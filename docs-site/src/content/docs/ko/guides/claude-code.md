@@ -14,6 +14,29 @@ Messages API를 통해 사용하는 Devin 경로(SWE-2 포함)에서는 늦게 �
 이 출력 순서 수정으로 Cognition이 생성된 일부 시스템 텍스트를 거부하는 별개의 문제가 해결되지는 않아요.
 시스템 지시와 안전 제약은 그대로 유지해요.
 
+## CLI와 외부 실행 앱의 티어 기본값
+
+Claude Code 탭에서 Opus, Sonnet, Haiku, Fable 기본 모델을 선택한 뒤 **저장**하세요.
+`claudeCode.tierModels` 값은 새 `ocx claude` 실행에 전달되며, 현재 주 모델이나 추론 강도,
+Desktop의 모델 계열 할당은 바꾸지 않아요.
+
+`claude`를 직접 실행하는 앱에는 `ocx`의 환경 변수가 전달되지 않아요. 저장 후
+**Claude 설정 미리보기**에서 `ANTHROPIC_DEFAULT_*_MODEL` 변경을 확인하고 **Claude 설정에 적용**을
+누르세요. 변경 대상은 브라우저가 있는 PC가 아니라 OpenCodex 호스트의 Claude 사용자 설정이에요.
+새 값을 사용하려면 새 Claude 프로세스를 실행해야 해요. 기존 세션을 강제 재시작하지 않으며,
+라우팅이나 인증 연결도 설정하지 않으므로 직접 실행하는 앱의 OpenCodex 연결은 이미 준비되어 있어야 해요.
+
+명시적으로 선택한 티어만 적용해요. **미지정**은 기존 Claude 설정을 유지하며 네이티브 모델로
+초기화하지 않아요. 파일이 없으면 생성할 수 있지만, 기존의 빈 파일이나 손상된 JSON은 거부해요.
+미리보기 이후 설정이 바뀌면 다시 미리보기가 필요해요.
+
+적용 시 실제 파일을 Claude 설정 디렉터리의 비공개 `model-default-backups/apply-*/settings.json`으로
+잠시 이동해 내용을 확인하고, 대상에 다른 파일이 없을 때만 새 설정을 게시해요. 충돌이나 복원 중에도
+다른 프로그램이 만든 파일을 덮어쓰지 않아요. 잠깐 파일이 없는 구간이 있으므로 적용 중에는 설정 편집이나
+Claude 실행을 피하세요. 같은 볼륨의 이동과 하드 링크를 지원해야 하며, 실패 시 덮어쓰기 방식으로 우회하지 않아요.
+중단이나 자동 복원 실패 후에는 이 백업과 최신 변경을 대조해서 복원하세요. Windows와 Linux 동작은
+별도로 검증해야 해요. 실제 제공된 모델은 요청 로그로 확인하세요. Sonnet을 요청하는 외부 분류기에도 유용해요.
+
 ## 빠른 시작
 
 ```bash
@@ -31,6 +54,7 @@ ocx claude
 | `ANTHROPIC_MODEL` | `claudeCode.model` (선택 사항) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claudeCode.tierModels.haiku ?? claudeCode.smallFastModel` (선택 사항, 기존 `ANTHROPIC_SMALL_FAST_MODEL`도 지원) |
 | `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE}_MODEL` | `claudeCode.tierModels.*` (구독으로 실행할 때 설정하지 않으면 네이티브 `claude-opus-5-5[1m]` / `claude-sonnet-5-5[1m]` / `claude-fable-5-1[1m]`) |
+| `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE,HAIKU}_MODEL_NAME` | OpenCodex가 라우팅 별칭으로 설정한 티어 슬롯의 `/model` 라벨(예: `ocx-claude-native--gpt-6.1-sol` → `gpt-6.1-sol (native)`). launchd 시스템 환경과 셸 훅에도 같은 짝으로 기록합니다. 모델 ID는 별칭 그대로입니다. 직접 설정한 슬롯이나 라벨은 건드리지 않습니다 |
 | `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | `alwaysEnableEffort`가 켜져 있으면 `1` (조건부) |
 | `ENABLE_TOOL_SEARCH` | `claudeCode.toolSearch`가 설정된 경우 (조건부, 기본값은 꺼짐) |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | `maxContextTokens`가 설정된 경우 기존 컨텍스트 재정의 값 (조건부) |
@@ -161,28 +185,28 @@ OpenCodex 소유의 선택된 게이트웨이 항목, 저장된 게이트웨이 
 
 ### Claude Code CLI 1P
 
-연결 → Claude에서 CLI 1P를 켜거나 `ocx claude config set --first-party on`을 실행하세요. 끌 때는 `off`를 사용해요. 프록시가 꺼져 있거나 실행 중이지 않거나, CA·설정 파일을 준비할 수 없거나, 다른 프로그램이 프록시 설정을 소유하면 켜기 요청은 거절돼요. 끄기는 프록시 상태와 관계없이 저장돼요. Desktop 1P만 켜진 상태에서 터미널을 완전히 직접 연결하려면 셸에 `NO_PROXY='*'`를 설정하세요. 위의 계정 위험은 CLI 1P에도 적용돼요.
+연결 → Claude에서 CLI 1P를 켜거나 `ocx claude config set --first-party on`을 실행하세요. 끌 때는 `off`를 사용해요. 프록시가 꺼져 있거나 실행 중이지 않거나, CA·설정 파일을 준비할 수 없거나, 다른 프로그램이 프록시 설정을 소유하면 켜기 요청은 거절돼요. 끄기는 프록시 상태와 관계없이 저장돼요. Desktop 1P만 켜진 상태에서 터미널을 완전히 직접 연결하려면 셸에 `NO_PROXY='*'`를 설정하세요. 위의 계정 위험은 CLI 1P에도 적용돼요. 1P가 켜져 있는 동안 OpenCodex는 `~/.claude/settings.json`의 `NO_PROXY`에 `127.0.0.1`, `localhost`, `::1`, `0.0.0.0`도 추가해서 로컬 MCP 서버(`*.localhost` 이름 포함)가 프록시를 거치지 않게 해요. 그 밖의 `127.x` 주소는 직접 추가하세요. 기존 `NO_PROXY` 값에는 빠진 항목만 덧붙이고, 끄면 OpenCodex가 원래 값을 기록할 수 있었고 그 뒤로 값을 바꾸지 않았을 때 원래 값으로 되돌려요. 그렇지 않으면 추가된 항목을 포함한 현재 값을 그대로 둬요.
 Claude 라우팅을 꺼도 소유한 설정 환경 변수는 남아요. 리스너가 실행 중이면 모든 Messages 요청을 그대로 전달하지만, 프록시가 멈추면 OpenCodex를 실행하거나 Desktop/CLI 1P를 끄기 전까지 일반 `claude`는 연결할 수 없어요. `ocx claude`는 소유한 설정 환경 변수가 있고 상속된 외부 HTTPS 프록시가 없을 때만 `NO_PROXY=*`를 설정해요. 외부 프록시가 있으면 보존하고, 설정의 인터셉트가 계속 적용되므로 1P를 끄거나 설정을 해제하라는 경고를 표시해요.
 화면은 설정을 읽지 못한 상태(unknown), opencodex 토큰이 있는 프록시에 관리 대상이 아닌 CA가 붙은 상태(foreign), Claude 라우팅이 꺼졌지만 리스너는 살아 있어 요청을 그대로 전달하는 상태(disabled)를 구분해요. foreign이면 HTTPS_PROXY / NODE_EXTRA_CA_CERTS를 직접 고치고, disabled이면 재시작 전에 1P를 꺼서 설정을 지우세요. 리스너가 없으면 stopped, 관리 대상 CA를 쓰지만 포트·토큰이 다르면 broken이에요. 1P가 켜진 상태에서 인터셉트를 제공할 수 없으면 stopped와 broken 모두 routingOff 경고를 보여 줘요. Claude 라우팅이나 인터셉트가 꺼졌거나 이 기기가 다른 opencodex 허브의 클라이언트일 수 있으므로, 이 기기에서 다시 켜거나 1P를 꺼서 설정을 지우라고 안내해요. 인터셉트가 가능한 설정일 때만 stopped는 opencodex 실행, broken은 `ocx ensure` 또는 재시작을 안내해요. CLI 1P만 켰는데 프록시 설정이 없으면 미적용, 한쪽만 켜고 프록시가 정상이면 공유 전달, 둘 다 껐는데 설정이 남으면 잔여 설정으로 표시해요.
 unknown은 설정이 아직 opencodex 프록시를 가리키는지 판단할 수 없다는 뜻이에요. 외부 CA와 토큰 없는 127.0.0.1 프록시가 함께 있으면 local로 표시해요. opencodex 소유인지 확인할 수 없으므로 더 이상 사용하지 않는다면 ~/.claude/settings.json에서 HTTPS_PROXY를 지우세요. disabled는 현재 리스너와 설정이 정확히 맞을 때만 나타나고, 포트나 토큰이 어긋나면 라우팅이 꺼져 있어도 broken이에요.
 
 ### Picker 모드: 1P Code 탭에 opencodex 모델 표시하기
 
-Picker 모드는 1P 모드의 일부예요. macOS에서 1P를 선택하면 기본으로 켜지지만,
+Picker 모드는 1P 모드의 일부예요. macOS와 Windows에서 1P를 선택하면 기본으로 켜지지만,
 `claudeCode.intercept.picker: false`를 설정하면 꺼져요. 1P Desktop의 Code 탭 모델 선택기를 바꿔서
-사용 가능한 opencodex 모델을 이름으로 보여줘요. 처음 켤 때 macOS 로그인 키체인에서 로컬 인증 기관을
+사용 가능한 opencodex 모델을 이름으로 보여줘요. 처음 켤 때 macOS 로그인 키체인이나 Windows 현재 사용자 Root 저장소에서 로컬 인증 기관을
 신뢰하라는 메시지가 표시될 수 있어요. 이 인증 기관은 `claude.ai`와 그 하위 도메인으로 제한돼요.
 내보낼 수 있는 서명용 인증서와 키는 OS 자격 증명 저장소로 보호하며, 일반적인 재시작에서는 같은 것을 재사용해요.
 OpenCodex 설정 디렉터리에 Picker 서명 키를 평문으로 저장하지 않아요. 제한된 CA의 전체 검증과 OS 신뢰 확인은
-계속 적용돼요. 승인한 인증서와 키가 같고 자격 증명 저장소를 사용할 수 있다면 재시작 시 인증서 신뢰 설정을
-추가하거나 삭제하지 않아요. 시작 시 복원은 신뢰를 설치하지 않아요. 신뢰가 없거나 철회됐거나 확인할 수 없다면
+계속 적용돼요(Windows에서는 정확한 지문과 확인된 리프로 검증해요). 승인한 인증서와 키가 같고 자격 증명 저장소를 사용할 수 있다면 재시작 시 macOS 인증서 신뢰 설정을
+추가하거나 삭제하지 않아요. 시작 시 복원이나 상태 확인은 신뢰를 설치하지 않아요. 신뢰가 없거나 철회됐거나 확인할 수 없다면
 Picker는 대기 상태로 남아요. `ocx claude desktop picker on` 또는 `ocx claude desktop picker trust`를 직접 실행해
-신뢰를 부여하면 돼요.
+신뢰를 부여하면 돼요(Windows에서는 확인 창이 나올 수 있어요).
 
 이전 인증서에서 한 번 마이그레이션할 때는 기존 신뢰를 제거하기 위한 동의가 필요할 수 있어요. 정리가 끝나지
 않으면 Picker는 사용할 수 없고 적용된 프로필은 복호화하지 않는 중계로 동작해요. 키체인 잠금 해제나 앱의
-자격 증명 접근 허용은 별도의 macOS 동작이며, 재시작이나 업데이트 때도 메시지가 나올 수 있어요.
-Windows와 Linux에서는 Picker를 지원하지 않으며 Picker CA, 자격 증명 저장소, 프록시 작업을 시작하지 않아요.
+자격 증명 접근 허용은 별도의 macOS 동작이며, 재시작이나 업데이트 때도 메시지가 나올 수 있어요. Windows에서는 `on`이나 `trust`를 직접 실행할 때 루트 추가 확인이 나올 수 있어요.
+Linux에서는 Picker를 지원하지 않으며 Picker CA, 자격 증명 저장소, 프록시 작업을 시작하지 않아요.
 기본 Claude 인터셉트는 계속 사용할 수 있고, 로컬 CA 파일에 소유자, 심볼릭 링크, 파일 권한, Windows ACL 검사를 적용해요.
 
 Picker 모드가 켜져 있는 동안 Claude Desktop의 네트워크는 OpenCodex를 거쳐요. OpenCodex가 중단되면
@@ -192,6 +216,8 @@ Picker 모드를 끄거나 Desktop을 완전히 다시 시작할 때까지 Deskt
 끌 수 있어요. Picker 프로필을 선택한 뒤에는 Claude Desktop을 완전히 종료하고 다시 열어야 해요.
 
 Picker 모드는 1P의 일부이므로 [1P 계정 위험](#1p직접-선택)도 그대로 적용돼요.
+
+상위 서버의 첫 응답 전에는 60초 동안 전송이 진행되지 않는 Picker 업로드를 종료해요. 유휴 시간 만료는 성공 응답을 보내지 않고 업로드를 실패 처리하며, HTTP/2에서는 해당 스트림만 재설정해요. 상위 서버가 데이터를 받지 못해 전송을 일시 중지한 동안에는 이 타이머도 멈추고, 업로드가 끝나거나 첫 응답이 오면 해제해요. 이 유휴 타이머는 전체 업로드 시간에 추가 제한을 두지 않으며, 기존 런타임·프로토콜 제한은 그대로 적용돼요. 응답 스트림은 이 타이머의 적용 대상이 아니에요.
 
 ### Code 탭에서 opencodex 모델 쓰기 (1P 바인딩)
 
@@ -283,7 +309,7 @@ import/export는 로컬 설정만 다뤄요. 허브 프로필을 바꾸지 않�
 능력 정보(추론 강도 사다리, thinking 타입)를 실어 보냅니다 — Claude Desktop의 서드파티
 게이트웨이 모드가 추론 강도 선택 UI를 열 수 있게 하기 위해서입니다. 실제 Anthropic 모델은
 원래 id를 그대로 유지합니다. 합성된 2026 날짜는 내부 슬롯이며 출시일이 아닙니다. 구버전의
-해시 별칭과 `claude-ocx-<provider>--<model>`, `claude-ocx2-<provider>--<model>` 별칭도 계속 해석됩니다. 저장된 `claude-ocx-`는 `ocx-claude-`로, 이스케이프된 `claude-ocx2-`는 `ocx-claude2-`로 한 번 다시 고르면 실제 컨텍스트 창과 compact가 함께 적용됩니다. 컨텍스트가 1M이거나 기본 압축 임곗값(829,800) 이상인 모델에는
+해시 별칭과 `claude-ocx-<provider>--<model>`, `claude-ocx2-<provider>--<model>` 별칭도 계속 해석됩니다. 저장된 `claude-ocx-`는 `ocx-claude-`로, 이스케이프된 `claude-ocx2-`는 `ocx-claude2-`로 한 번 다시 고르면 카탈로그의 유효 컨텍스트 창과 compact가 함께 적용됩니다. 컨텍스트가 1M이거나 기본 압축 임곗값(829,800) 이상인 모델에는
 `…[1m]` 행이 하나 더 생깁니다 — 이걸 고르면 Claude Code가 그 모델의 컨텍스트를 1M로 계산합니다
 (자동 요약 유지, 프록시가 표식을 떼고 라우팅). 선택하면 Claude Code의
 `settings.json` `model` 필드에 저장되고, 인바운드 요청에서
@@ -298,7 +324,7 @@ Claude Code 2.1.129 이상은 `GET /v1/models?limit=1000`에서 게이트웨이 
 | 화면 | 형식 | 예시 |
 | --- | --- | --- |
 | Claude Code CLI | `ocx-claude-<provider>--<model>` (plain) 또는 `ocx-claude2-…` (escaped) | `ocx-claude-native--gpt-5.6-sol` |
-| Claude Desktop 3P | `claude-opus-4-8-p<code>` (3자리 base36 프로필 슬롯) | `claude-opus-4-8-p01q` |
+| Claude Desktop 3P | `claude-fable-5-p<code>` (3자리 base36 프로필 슬롯) | `claude-fable-5-p01q` |
 
 프록시는 요청마다 계열을 골라요. `?ids=cli` 또는 `?ids=desktop`이 우선하고, 지정하지 않으면
 `claude-code/*` user-agent에는 읽기 쉬운 CLI 형식을, 다른 클라이언트에는 Desktop 코드를
@@ -343,7 +369,9 @@ v2 별칭은 이스케이프를 펼쳐요. 읽기 쉬운 형식으로 표현할 
 
 ### 컨텍스트 변형 `[1m]` 표식
 
-공식 컨텍스트 창이 1M이거나 기본 압축 임곗값(829,800) 이상인 모델에는 `…[1m]` 선택기 행이 하나 더
+이 판단에는 카탈로그의 유효 컨텍스트 창을 쓰며, [사용자 지정 공급자의 추정값](/ko/reference/configuration/providers/#사용자-지정-공급자의-컨텍스트)이 포함될 수 있어요. 추정값은 중계 서비스의 실제 용량을 보장하지 않아요.
+
+카탈로그의 유효 컨텍스트 창이 1M이거나 기본 압축 임곗값(829,800) 이상인 모델에는 `…[1m]` 선택기 행이 하나 더
 생겨요. 이 기준은 고정이라 압축 값을 직접 바꿔도 낮아지지 않고, Anthropic 경로의 Claude 모델은 실제 1M이어야
 해요. 자동 컨텍스트를 끄면 1M 모델만 해당해요. 실제 창을 넘으면 `prompt is too long` 오류가 오고 Claude Code가 자동으로 압축해요. 이 행을 선택하면 Claude Code가
 전체 1M 컨텍스트를 계산해요. 프록시는 별칭 해석과 라우팅 전에 대소문자를 구분하지 않고 `[1m]`
@@ -354,7 +382,7 @@ v2 별칭은 이스케이프를 펼쳐요. 읽기 쉬운 형식으로 표현할 
 Claude Code는 알 수 없는 모델의 컨텍스트를 200k 토큰으로 계산해요. 기본으로 켜져 있는 **자동
 컨텍스트**는 이 문제를 해결해요.
 
-1. 실행 환경 슬롯에는 실제 컨텍스트 창이 200k보다 크고 설정한 자동 압축 임곗값 이상일 때
+1. 실행 환경 슬롯에는 카탈로그의 유효 컨텍스트 창이 200k보다 크고 설정한 자동 압축 임곗값 이상일 때
    `[1m]` 표식이 붙어요. 디스커버리와 Desktop 선택기 행은 그 임곗값을 따르지 않고, 고정된 829,800 토큰 하한
    (Anthropic 경로의 Claude 모델은 실제 1M)을 써요.
 2. `CLAUDE_CODE_AUTO_COMPACT_WINDOW`(기본값 `829800`, 범위 `100000`–`1000000`)를 주입해 해당
@@ -369,6 +397,10 @@ Claude Code는 알 수 없는 모델의 컨텍스트를 200k 토큰으로 계산
 **연결 → Claude**에서 압축 값을 조절할 수 있어요. **경고:** 모델의 실제 컨텍스트 창보다 크게 올리면
 요약을 시작하기 전에 채팅 오류가 발생해요.
 
+컨텍스트 초과 오류를 정규화할 때는 제공자 오류 메시지의 첫 65,536 UTF-16 코드 단위만 사용해요.
+뒤쪽 진단 내용이나 토큰 수는 별도 잘림 표시 없이 빠질 수 있어요.
+자세한 제한과 토큰 수 처리 조건은 [영문 가이드](/guides/claude-code/#auto-context-big-context-models-without-the-200k-ceiling)를 참고하세요.
+
 1M 미만인 네이티브 Anthropic 모델에는 자동으로 표식을 붙이지 않아요. 직접 내보낸 압축 값은 실행 슬롯 표식에서 항상
 우선하며, 프록시는 **사용자가 지정한** 값을 기준으로 어떤 모델에 안전하게 표식을 붙일지 결정해요.
 디스커버리 행은 그 값을 무시하고 고정 하한을 유지해요.
@@ -380,7 +412,7 @@ Claude Code는 알 수 없는 모델의 컨텍스트를 200k 토큰으로 계산
 긴 컨텍스트 모델이 실행 환경 슬롯, Desktop 선택기, Desktop 3P(`prefer1m`), 생성된 서브에이전트에서 1M으로
 잡혀요. `200k`로 바꾸면 자동 `[1m]` 표식을 붙이지 않고 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`도 넣지 않으며,
 Desktop 3P는 `supports1m`은 남기고 `prefer1m`만 빼요. 직접 `[1m]`을 붙인 선택은 계속 쓸 수 있어요(생성된
-서브에이전트와 강제 서브에이전트는 모델 창이 감당하지 못하는 표식을 여전히 떼요). 디스커버리 목록에는 실제 1M 모델의
+서브에이전트와 강제 서브에이전트는 모델 창이 감당하지 못하는 표식을 여전히 떼요). 디스커버리 목록에는 카탈로그 창이 1M 이상인 모델의
 `· 1M` 행이 계속 나와요. `200k`는 자동 컨텍스트보다 우선해요. 직접 export한 압축 값이 있어도 자동 표식은 다시 켜지지
 않고, 그 export 값은 opencodex가 건드리지 않아요.
 
@@ -543,9 +575,9 @@ Messages → Responses로 변환되는 요청에서는 Claude Code의 `/effort` 
 | Assistant 텍스트 | `output_text` |
 | Assistant `tool_use` | `function_call`(`input` → JSON 문자열로 변환한 `arguments`) |
 | 사용자 `tool_result` | `function_call_output`(`is_error` → `[tool error]` 접두사) |
-| 도구 결과의 `tool_reference` | 짝지어진 결과에 `Tool loaded: <tool_name>` 텍스트로 보존합니다. 도구 선언을 추가하거나 번역 경로의 서버 측 지연 로딩을 활성화하지는 않습니다. |
+| 도구 결과의 `tool_reference` | 기본적으로 짝지어진 결과에 `Tool loaded: <tool_name>` 텍스트를 보존합니다. [append-only 옵션](/guides/claude-code/#preserve-cache-prefixes-when-client-tools-load)을 켠 적격 최종 Responses 경로에서는 성공한 클라이언트 검색 결과 위치에 현재 선언된 지연 함수의 정의를 배치할 수 있습니다. 참조만으로 도구 권한이나 서버 측 검색 기능을 추가하지는 않습니다. |
 | `thinking` / `redacted_thinking` 재생 | 서명과 비공개 페이로드를 제한된 `ocxr1` 봉투에 담은 `reasoning` 항목 |
-| Function 도구 | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
+| Function 도구 | `{type: "function"}`(`web_search*` → `{type: "web_search"}`). `api.anthropic.com`으로 번역하여 보내는 경로에서는 타입이 지정된 `web_search_*`와 `web_fetch_*` 선언도 Anthropic에 전달되어 서버에서 실행됩니다. 웹 검색 사이드카가 `web_search`를 제공하면 사이드카가 우선합니다. 검색과 가져오기 결과는 `server_tool_use` 및 대응하는 `web_search_tool_result` / `web_fetch_tool_result` 블록으로 클라이언트에 반환됩니다 `allowed_domains`, `blocked_domains`, `user_location`이 있으면 번역된 Responses/Chat 경로에서 호스팅 검색을 제외하며, 제외된 검색을 강제하면 400을 반환합니다. 유효한 `defer_loading` 함수 정의는 일반 함수로 호출할 수 있습니다. [번역 제한](/guides/claude-code/#search-restrictions-and-deferred-tools-on-translated-routes)을 참고하세요. |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, 이름 지정 함수→`{type:"function",name}`, 호스팅 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
@@ -682,12 +714,18 @@ Anthropic 백엔드를 명시하면 의도적으로 실패 후 중단해요.
 `ANTHROPIC_BASE_URL`이 오래된 값일 수 있어요. 새 터미널을 열거나 `ocx claude`를 다시 실행하세요.
 
 **대형 모델인데도 컨텍스트가 200k로 제한됨** — 선택기에서 `[1m]` 변형을 고르거나 기본으로
-켜져 있는 자동 컨텍스트를 사용하세요. 선택기에 `[1m]` 행이 없다면 모델의 공식 컨텍스트 창이
+켜져 있는 자동 컨텍스트를 사용하세요. 선택기에 `[1m]` 행이 없다면 카탈로그에 표시된 모델의 유효 컨텍스트 창이
 고정된 829,800 토큰 하한보다 작을 수 있어요.
 
 **스킬을 불러올 때 토큰 수가 많음** — 번들 `claude-api` 스킬(약 136k 토큰)은 Claude 모델을
 언급하면 자동으로 불러와요. 네이티브 패스스루에서는 정상이며, 라우팅 모델에서는 opencodex가
 기본적으로 스텁으로 바꿔요(`blockedSkills: ["claude-api"]`).
+
+**첫 턴부터 MCP 도구 스키마가 컨텍스트를 채움** — `claudeCode.toolSearch: true`는 클라이언트의 도구 검색을 켜는 선택 설정이며 기본값은 꺼짐입니다. 네이티브 Anthropic 경로는 서버 측 검색과 지연 도구 참조를 그대로 전달합니다. 기본 번역 경로는 같은 서버 기능을 제공하지 않으므로 모든 타사 경로에서 켜도 된다는 뜻은 아닙니다.
+
+예외적으로, 클라이언트가 직접 실행하는 eager `ToolSearch` 함수와 구조화된 검색 결과를 제공하고 최종 Responses 목적지가 `additional_tools`를 지원한다면 `claudeCode.appendOnlyToolLoadingModels`로 그 목적지를 명시하여 사용할 수 있습니다. 이 옵션은 사용하지 않은 지연 정의를 초기 카탈로그에서 제외하고 성공한 검색 위치에 현재 정의를 배치합니다. 런처의 `toolSearch` 설정만으로 이 동작이나 서버 측 검색이 활성화되지는 않습니다. 지원되는 클라이언트와 게이트웨이 조합에서만 켜고, 그 밖의 타사 경로에서는 꺼 두세요. 기존 compatibility-enforcement 검사는 그대로 적용되므로 지원하지 않는 요청을 거절할 수 있습니다. 캐시 적중이나 네이티브 검색과의 완전한 동등성은 보장하지 않습니다. [영문 설정 안내](/guides/claude-code/#preserve-cache-prefixes-when-client-tools-load)를 참고하세요.
+
+OpenCode Go의 Responses 엔드포인트와 공식 xAI Responses 호스트는 선택 목록에 있어도 원래 전체 도구 카탈로그를 유지합니다. 이 목적지들은 `additional_tools`를 초기 `tools`로 승격하거나 거절하므로 시간순 로딩 prefix를 보존할 수 없습니다. 검색 결과의 정의를 초기 `tools`로 승격하는 다른 게이트웨이에서도 이 옵션을 꺼 두세요.
 
 **서브에이전트가 잘못된 모델로 디스패치됨** — 로스터 에이전트(`ocx-*`)는 Agent 도구의 `model`
 인자가 아니라 `<!-- ocx-route: ... -->` 지시문을 사용해요. 지시문이 원하는 라우트와 일치하는지
@@ -703,7 +741,7 @@ The Subagents page offers **Force all subagents onto one model**, off by default
 
 `ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
 
-This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` when the authoritative window reaches the fixed 829,800-token floor, and only for a genuine 1M window on Anthropic Claude models and bare `claude-*` selectors; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` when the effective catalog window reaches the fixed 829,800-token floor, and only for a genuine 1M window on Anthropic Claude models and bare `claude-*` selectors; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
 
 Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
 

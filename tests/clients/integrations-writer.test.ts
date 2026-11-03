@@ -15,6 +15,7 @@ import {
   applyIntegration,
   disableIntegration,
   overwriteIntegration,
+  refreshIntegration,
   restoreIntegration,
   type IntegrationWriteInput,
 } from "../../src/integrations/writer";
@@ -1584,5 +1585,77 @@ describe("integration write ownership guard (#4197)", () => {
       effectiveUid: () => undefined,
       ownerUid: () => 987,
     })).not.toThrow();
+  });
+});
+
+describe("the managed file size bound", () => {
+  test("reports the retained backup if an oversized write cannot clean it up", () => {
+    const configPath = join(home, ".pi", "agent", "models.json");
+    mkdirSync(dirname(configPath), { recursive: true });
+    const seed = `{"pad":"${"x".repeat(4 * 1024 * 1024 - 256)}"}\n`;
+    writeFileSync(configPath, seed);
+    const result = applyIntegration(input({
+      clientId: "pi",
+      store: { ...store, discardUncommittedSnapshot: () => { throw new Error("cleanup denied"); } },
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("write_failed");
+      expect(result.message).toContain("could not remove the unused backup: cleanup denied");
+      expect(readFileSync(result.snapshotPath!, "utf8")).toBe(seed);
+    }
+    expect(readFileSync(configPath, "utf8")).toBe(seed);
+    expect(store.countSnapshots("pi")).toBe(1);
+    expect(store.listOperations("pi")).toEqual([]);
+  });
+
+  test("a serialized write past the read bound refuses and leaves the file alone", () => {
+    const configPath = installPi();
+    /*
+     * Just under the bound, so status and the compare-before-commit recheck
+     * still read it, while the merged document lands past it. The write must
+     * refuse: landing it would leave a config the same seam then refuses to
+     * read, stranding the integration against its own file.
+     */
+    const seed = `{"pad":"${"x".repeat(4 * 1024 * 1024 - 256)}"}\n`;
+    writeFileSync(configPath, seed);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = applyIntegration(input({ clientId: "pi" }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("write_failed");
+        expect(result.snapshotPath).toBeUndefined();
+      }
+      expect(store.countSnapshots("pi")).toBe(0);
+      expect(store.listOperations("pi")).toEqual([]);
+    }
+    expect(readFileSync(configPath, "utf8")).toBe(seed);
+    expect(readIntegrationState(input({ clientId: "pi" })).state).toBe("absent");
+  });
+});
+
+describe("omo dialect opt-in (#7431)", () => {
+  const RESPONSES = { ...CONFIG, omoClientExport: { api: "openai-responses" } } as OcxConfig;
+  const FOREIGN = { baseUrl: "http://elsewhere/v1", api: "anthropic-messages", apiKey: "OTHER_KEY", models: [] };
+
+  test("refresh keeps the Responses dialect and leaves foreign provider rows alone", () => {
+    const configPath = installOmo();
+    writeFileSync(configPath, JSON.stringify({ providers: { other: FOREIGN } }, null, 2) + "\n");
+    expect(applyIntegration(input({ clientId: "omo", config: RESPONSES })).ok).toBe(true);
+    const refreshed = refreshIntegration(input({ clientId: "omo", config: RESPONSES }));
+    expect(refreshed.ok).toBe(true);
+    const written = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(written.providers.opencodex.api).toBe("openai-responses");
+    expect(written.providers.other).toEqual(FOREIGN);
+  });
+
+  test("dropping the opt-in writes Chat again on the next refresh, and disable keeps foreign rows", () => {
+    const configPath = installOmo();
+    writeFileSync(configPath, JSON.stringify({ providers: { other: FOREIGN } }, null, 2) + "\n");
+    expect(applyIntegration(input({ clientId: "omo", config: RESPONSES })).ok).toBe(true);
+    expect(refreshIntegration(input({ clientId: "omo" })).ok).toBe(true);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).providers.opencodex.api).toBe("openai-completions");
+    expect(disableIntegration(input({ clientId: "omo" })).ok).toBe(true);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).providers).toEqual({ other: FOREIGN });
   });
 });

@@ -1,6 +1,6 @@
 /** Anthropic OAuth flow (Claude Pro/Max). Ported from jawcode oauth/anthropic.ts. */
 import { OAuthCallbackFlow } from "./callback-server";
-import { bindAnthropicIdentity, resolveAnthropicAccountIdentity } from "./anthropic-identity";
+import { bindAnthropicIdentity, normalizeAnthropicIdentity, resolveAnthropicAccountIdentity } from "./anthropic-identity";
 import { generatePKCE } from "./pkce";
 import type { LocalTokenImportMode, OAuthController, OAuthCredentials } from "./types";
 import { outboundProxyConfigured, startupOutboundProxyConfigured } from "../lib/proxy-env";
@@ -12,7 +12,19 @@ const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const CALLBACK_PORT = 54545;
 const CALLBACK_PATH = "/callback";
+/** Profile enrichment budget on token refresh; login paths keep the resolver's own deadline. */
+const REFRESH_PROFILE_TIMEOUT_MS = 2_000;
 const SCOPES = "org:create_api_key user:profile user:inference";
+/**
+ * Provider-hosted code-display redirect: Anthropic renders `code#state` for the user to copy
+ * instead of redirecting to a local port. This is what makes login possible from a container or
+ * a hosted gateway, where no browser can reach this process. Same OAuth client as the callback
+ * flow — only the redirect differs, so it must be the redirect_uri used for BOTH the authorize
+ * request and the token exchange.
+ */
+export const ANTHROPIC_CODE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+/** A displayed code is copied by hand across devices; the 300s callback wait is too short. */
+const CODE_MODE_TIMEOUT_MS = 10 * 60_000;
 
 // ── OAuth-request requirements applied by the anthropic adapter when authMode==="oauth" ──
 export const ANTHROPIC_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
@@ -130,11 +142,37 @@ function credsFrom(data: AnthropicTokenResponse, refreshFallback?: string): OAut
   };
 }
 
-export class AnthropicOAuthFlow extends OAuthCallbackFlow {
-  #verifier = "";
+async function withAccountProfile(credential: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials> {
+  const profile = await resolveAnthropicAccountIdentity(credential.access, signal);
+  if (!profile) return credential;
+  // Token-response identity remains authoritative here; enrichment changes display metadata only.
+  const identity = normalizeAnthropicIdentity(credential.anthropicIdentity, credential.access);
+  if (identity && identity.accountUuid !== profile.accountUuid) return credential;
+  return { ...credential, plan: profile.plan ?? null };
+}
 
-  constructor(ctrl: OAuthController) {
-    super(ctrl, CALLBACK_PORT, CALLBACK_PATH);
+export class AnthropicOAuthFlow extends OAuthCallbackFlow {
+  /**
+   * PKCE verifier for THIS flow. One `AnthropicOAuthFlow` is constructed per login and
+   * `generateAuthUrl` runs once on it, so the verifier is already flow-scoped: a second
+   * concurrent login builds a second instance and cannot reach this field.
+   */
+  #verifier = "";
+  #codeMode: boolean;
+
+  constructor(ctrl: OAuthController, opts?: { codeMode?: boolean }) {
+    if (opts?.codeMode) {
+      super(ctrl, {
+        preferredPort: CALLBACK_PORT,
+        callbackPath: CALLBACK_PATH,
+        redirectUri: ANTHROPIC_CODE_REDIRECT_URI,
+        skipCallbackServer: true,
+        timeoutMs: CODE_MODE_TIMEOUT_MS,
+      });
+    } else {
+      super(ctrl, CALLBACK_PORT, CALLBACK_PATH);
+    }
+    this.#codeMode = opts?.codeMode === true;
   }
 
   async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
@@ -152,8 +190,9 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
     });
     return {
       url: `${AUTHORIZE_URL}?${authParams.toString()}`,
-      instructions:
-        "Complete Claude login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
+      instructions: this.#codeMode
+        ? "Open this URL in any browser, approve access, then paste the code Anthropic displays (it looks like code#state)."
+        : "Complete Claude login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
     };
   }
 
@@ -174,15 +213,18 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
       redirect_uri: redirectUri,
       code_verifier: this.#verifier,
     });
-    return credsFrom(parseTokenResponse(responseBody));
+    return withAccountProfile(credsFrom(parseTokenResponse(responseBody)), this.ctrl.signal);
   }
 }
 
 export async function loginAnthropic(
   ctrl: OAuthController,
-  opts?: { importLocal?: LocalTokenImportMode; instance?: AnthropicInstanceId },
+  opts?: { importLocal?: LocalTokenImportMode; instance?: AnthropicInstanceId; codeMode?: boolean },
 ): Promise<OAuthCredentials> {
-  const importLocal = opts?.importLocal ?? "off";
+  // A code-mode caller asked for a URL to show and a box to paste into. Importing a local
+  // Claude Code token instead would complete WITHOUT ever firing onAuth, so the caller would
+  // get no URL at all — a different outcome than the one its contract promises.
+  const importLocal = opts?.codeMode ? "off" : opts?.importLocal ?? "off";
   if (opts?.instance === "anthropic2" && importLocal !== "off") throw new AnthropicLocalCliImportError();
   if (importLocal !== "off") {
     const { detectClaudeCodeToken } = await import("./local-token-detect");
@@ -192,7 +234,8 @@ export async function loginAnthropic(
       if (local.expires >= Date.now() + 60_000) {
         const identity = await resolveAnthropicAccountIdentity(local.access, ctrl.signal);
         ctrl.signal?.throwIfAborted();
-        return { ...local, ...(identity ? { accountId: identity.accountUuid, anthropicIdentity: identity } : {}) };
+        return { ...local, ...(identity ? { accountId: identity.accountUuid,
+          anthropicIdentity: normalizeAnthropicIdentity(identity, local.access), plan: identity.plan ?? null } : {}) };
       }
       try {
         return { ...(await refreshAnthropicToken(local.refresh)), source: "local-cli" };
@@ -209,7 +252,7 @@ export async function loginAnthropic(
       );
     }
   }
-  return new AnthropicOAuthFlow(ctrl).login();
+  return new AnthropicOAuthFlow(ctrl, { codeMode: opts?.codeMode === true }).login();
 }
 
 export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
@@ -218,5 +261,7 @@ export async function refreshAnthropicToken(refreshToken: string): Promise<OAuth
     client_id: CLIENT_ID,
     refresh_token: refreshToken,
   });
-  return credsFrom(parseTokenResponse(responseBody), refreshToken);
+  // Refresh can sit on a request path, so the profile enrichment gets a short deadline. A
+  // missed read leaves plan unobserved and the stored label survives through mergeOAuthPlan.
+  return withAccountProfile(credsFrom(parseTokenResponse(responseBody), refreshToken), AbortSignal.timeout(REFRESH_PROFILE_TIMEOUT_MS));
 }

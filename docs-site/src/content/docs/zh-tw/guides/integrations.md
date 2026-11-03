@@ -5,6 +5,8 @@ description: 從儀表板把 opencodex 連接到 OpenCode、Pi、OMP、Hermes、
 
 **連線** 分頁會把 opencodex 的 provider 區塊寫入客戶端自己的設定檔，也會把它移除。共有十八個客戶端以這種方式運作，每個都有一個開關：
 
+在 Windows 上，要求絕對路徑的覆寫值必須包含磁碟機代號（`C:\Users\me\client`）或 UNC 共用（`\\server\share\client`）。`\Users\me\client` 和 `/client/config` 依賴目前的磁碟機，因此會被拒絕。明確支援 `~` 的選擇器仍以有效家目錄展開；Gentle Shell 不展開 `~`。
+
 | 客戶端 | 設定檔 | 格式 | 變更生效時機 | 憑證 |
 |---|---|---|---|---|
 | OpenCode | `~/.config/opencode/opencode.json` | JSON | 下次直接啟動 | `OPENCODEX_OPENCODE_API_KEY` |
@@ -176,6 +178,8 @@ OAuth 或 API key，並拒絕 `--api-key`、`--base-url` 與 `--region` 覆寫�
 
 ## ZCode 3.14 以後
 
+以上路徑為預設值。在預設家目錄的 `~/.zcode/v2/setting.json` 設定絕對路徑 `dataBaseDir` 後，儲存路徑改為 `<dataBaseDir>/.zcode/v2/provider_config.json`。`ZCODE_DATA_DIR` 直接指定 `.zcode` 根目錄且優先於設定；`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 優先指定供應商檔案。設定格式錯誤、無法讀取或使用相對路徑時，新套用與更新會被拒絕。既有所有權及復原記錄會保留。參閱[路徑與復原規則的英文原文](https://opencodex.me/guides/integrations/#zcode-314-and-later)。
+
 ZCode 3.14 把自訂供應商移到 `~/.zcode/v2/provider_config.json`，而本整合原本寫入的
 `~/.zcode/v2/config.json` 只剩下一次性匯入會讀取，而那次匯入只在新檔案不存在時執行。ZCode 首次啟動
 就會建立新檔案，因此只要曾經啟動過的安裝，匯入早已用掉，之後寫入 `config.json` 不會被任何東西讀到。
@@ -207,6 +211,18 @@ ocx integration client restore --op <operation-id>
 
 [CLI / rollback / CLINE_PROVIDER_SETTINGS_PATH](/guides/integrations/#cline-cli).
 
+## omo (Codex / LazyCodex) 角色推理強度
+
+偵測到 LazyCodex 後，可在 omo 分頁的 **omo (Codex / LazyCodex)** 區段為 `$CODEX_HOME/agents/*.toml` 中的每個角色選擇模型與推理強度，再按下 **儲存**。沒有固定模型的角色所在列可以只儲存推理強度，該角色仍繼承其模型。opencodex 只會更新該角色檔案根層級的 `model` 與 `model_reasoning_effort` 鍵，缺少的固定值會插入到檔案開頭附近；角色的指令、其他註解與其他鍵維持不變。只變更模型的儲存不會傳送 `effort`，兩個檔案中的推理強度都維持原樣。選擇某個等級會插入或取代角色檔案中的 `model_reasoning_effort`；若 LazyCodex 支援該等級，也會寫入 `~/.omo/omo.jsonc` 的 `[codex].agents.<role>.reasoning`（`ultra` 只保留在角色檔案中，並移除舊的 `reasoning`）。在命令列中可用 `ocx agent roles set <role> <model> --effort <level>` 完成相同操作。
+
+每一列都提供 **繼承推理強度**，包括已固定推理強度的角色。將已固定的強度改為此選項並儲存時，會傳送 `"effort": null`：移除角色檔案根層級的 `model_reasoning_effort` 行及其行尾註解，以及 omo.jsonc 中的 `[codex].agents.<role>.reasoning`。模型固定維持不變。之後 Codex 會像對待任何沒有自身覆寫值的角色一樣決定推理強度（明確的啟動值、`[agents]` 預設值或父工作階段），而不是使用固定的模型預設值。只能移除既有的單行字串值；多行或非字串值會以 409 `unsupported_model_value` 被拒絕，兩個檔案都不會變更。
+
+在 `PUT /api/codex-agent-roles/{role}` 中省略 `model` 時，角色檔案中的 `model` 固定值與 omo.jsonc 中的 `model` 都維持原樣，因此沒有固定模型的角色會繼續繼承模型，只變更或清除推理強度。儀表板會為這樣的列傳送只包含推理強度的請求；若 omo.jsonc 中沒有該角色的項目，只有儲存 LazyCodex 支援的推理強度等級時，才會建立只包含 `reasoning` 的項目。儲存絕不會移除模型固定值，因此 `null` 模型會以 400 `invalid_model` 被拒絕；既沒有 `model` 也沒有 `effort` 的請求會在讀取角色檔案或 omo.jsonc 之前以 400 `empty_update` 被拒絕。`ocx agent roles set` 一律需要指定模型。
+
+若 `~/.omo/omo.jsonc` 不存在，不會建立它。若其中含有註解，儲存會刪除這些註解，因此不會變更該檔案，請手動設定該值。略過鏡像不會復原角色檔案的儲存。若角色檔案已儲存但 omo.jsonc 寫入失敗，該列的按鈕會變成 **重試 omo.jsonc**，重新傳送相同的推理強度選擇，包括透過 **繼承推理強度** 進行的清除（`null`）。在重試成功之前，該角色之後任何不變更推理強度的 **儲存** 或 **自動指派** 的 **套用**，都會一併傳送這個待處理的選擇；明確選擇的推理強度會取代它。
+
+**自動指派** 會為每個已評估、且所選模型的推理強度等級清單不為空的角色提出推理強度；**套用**、**全部套用** 或 `ocx agent roles suggest --apply` 會插入或取代該角色的 `model_reasoning_effort`。推理強度取自所選模型本身的等級：最低等級、預設等級、比預設高一級，或最高等級。等級清單為空時不會提出推理強度（`proposedEffort: null`）；此時 **套用** 會省略 `effort`，保留既有的固定強度。`null` 提案絕不會清除固定的推理強度。
+
 ## Kilo
 
 Kilo 只會把 `provider.opencodex` 寫入 `~/.config/kilo` 下最先存在的全域檔（`XDG_CONFIG_HOME` 會移動該目錄；若沒有任何候選檔則建立 `kilo.jsonc`）。若另一個候選檔也定義 `provider.opencodex`，狀態會回報衝突且套用會拒絕。其他鍵保持不變。套用會重寫整個檔案，因此不會保留註解與尾隨逗號。每個模型的推論選擇會以變體映射的形式寫入 provider 區塊，與 OpenCode 匯出使用相同的生效規範中繼資料。`ocx sync` 與 `POST /api/sync` 會重新整理 OpenCodex 擁有的 Kilo 區塊，新的 Kilo 工作階段會載入更新後的檔案。請在 Kilo 中選擇 `opencodex/<模型>`。
@@ -220,3 +236,19 @@ ocx integration client enable --client kilo
 ## Factory Droid
 
 Factory Droid 使用 `~/.factory/settings.json`（Windows 上為 `%USERPROFILE%\.factory\settings.json`）。使用 `ocx integration client enable --client droid` 明確啟用，然後在 `/model` 中選擇自訂模型。受管理的項目不含金鑰，且僅支援迴環連線。停用會移除受管理的項目；Undo 會還原儲存的原始位元組。如果舊版 `config.json` 含有 OpenCodex 項目，或 `settings.local.json` 覆寫了 `customModels`，請先解決衝突再啟用。請參閱 [Factory BYOK 文件](https://docs.factory.ai/model-independence/byok)。
+
+## Hermes / Command Code: model names
+
+Hermes and Command Code support `--model-names alias|routed` (API: `modelNames`).
+The default is `routed`, independent of `preferModelAliasIds`. A connection
+stores its mode; later Apply without the option preserves it. Alias mode uses
+only provider-qualified aliases that the router proves equivalent; missing,
+unsafe or colliding aliases fall back to routed keys. Combos keep their keys.
+Removed/renamed aliases migrate on the next successful managed refresh, with
+foreign-edit refusal. Named Hermes profiles need explicit Apply.
+
+`ocx export --client hermes --model-names alias --json` previews a current
+already loaded catalog without writing client files or managed state; a cold or
+stale catalog returns unavailable. Explicit `--out` writes an export artifact.
+See the [English integration guide](/guides/integrations/#opt-in-alias-model-names)
+for the canonical workflow.

@@ -9,6 +9,12 @@ accepted, so a declined policy target never scopes the request's own route.
 `src/server/responses/policy-fallback.ts` inspects and executes each retry as a concrete candidate,
 so a public combo or profile alias cannot reselect its destination. Redirects remain inside the
 original evaluation, including eligible destinations omitted from the bounded diagnostic trace.
+The outer retry owner captures caller admission policy before its first attempt when ingress has not
+already supplied it. Every candidate receives that same immutable Advisor policy snapshot.
+
+When a main-account hard-lock fallback selects a profile, `src/server/responses/request-prepare.ts`
+checks its first ranked destination against the original model under the
+[fallback policy](../fallback-policy.md#sites), before authentication or upstream dispatch.
 
 Normal virtual-model wire mapping remains attached to its admitted selector and does not add a new
 eligible model. Policy traversal records settled physical destinations and skips a destination already

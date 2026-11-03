@@ -10,10 +10,10 @@ description: SSH で OpenCodex の Home コンピューターと Child コンピ
 - Home から Child に OpenSSH キーでログインできること。
 - Child から開始するリンクでは、Child から Home に OpenSSH キーでログインできる必要があります（パスワードログインには対応していません）。
 - Child に OpenCodex 2.66.0 以降がインストールされていること（Child から開始するリンクでは Home にも）。
-- 両方のコンピューターが macOS または Linux であること。
+- 両方のコンピューターで macOS、Linux、Windows x64 を使用できます。Windows には OpenSSH Server と Windows PowerShell が必要です。Git Bash と curl は不要です。
 - Home から Child を追加するダッシュボードは Home 上で開くか、ペアリング済みの Hub セッションを使用します。現在のコンピューターを Child にするには、オペレーターがペアリングしたダッシュボードセッションが必要です。認証情報なしのローカルセッションでは、このルーティング変更を確定できません。
 
-パスワード SSH と Windows は現在のフローに含まれません。リンクはどちら側からでも開始できます。次の手順のように Home から開始するか、後述の「このコンピューターを Child として接続する」のように Child から開始します。
+パスワード SSH はサポートされません。リンクは Home または Child から開始できます。Windows では検証済みの OpenSSH 接続経由で PowerShell を実行します。
 
 ## `#remote` から Child を追加する
 
@@ -55,7 +55,7 @@ Home のプロバイダーを使うコンピューターで次の操作を行い
 
 - **Connected** は SSH トンネルが準備でき、Child が Home のリンクを使える状態です。
 - **Reconnecting** はトンネルを再試行している状態です。再試行中はリクエストが `Retry-After` 付きの `503` を一時的に返すことがあります。自分のダッシュボードから接続した Child では、リクエストはまずトンネルの復帰を最大 15 秒待ちます。
-- **Failed** は対応が必要な状態です。SSH 認証、確認済みのホストキー、転送、タイムアウトの理由を確認してください。自分のダッシュボードから接続した Child は、スリープ、障害、再起動の後も自動で再試行します。タイムアウトや転送エラーの後は約 1 分ごと、認証エラーの後は 5 分ごとです。ホストキーが変わった場合は再試行しません。
+- **Failed** は対応が必要な状態です。SSH 認証、確認済みのホストキー、転送、タイムアウトの理由を確認してください。SSH トンネルを張る側が、スリープ、障害、再起動の後も自動で再試行します。Home が追加した Child では Home が、自分のダッシュボードから接続した Child では Child が再試行します。タイムアウトや転送エラーの後は 1 分後に再試行し、失敗が続くたびに間隔を倍にして最大 5 分ごとになります。認証エラーの後は 5 分ごとです。ホストキーが変わった場合は再試行しません。すぐに再接続するには、Home のダッシュボードで **Retry** を選ぶか、Home で `ocx link reconnect --link-id <id>` を実行します。OpenCodex を再起動せずに、そのリンクのトンネルだけを張り直します。
 
 リンクが失敗しても、ローカルプロバイダーへ自動的に切り替わることはありません。
 
@@ -78,13 +78,21 @@ Child はリンクを通じて Home コンピューターのプロバイダー�
 ## CLI リファレンス
 
 ```text
+ocx link probe <alias> [--json]
+ocx link add <alias> [--expect-fingerprint SHA256:…] [--json]
 ocx link port [--json]
 ocx link issue --alias <alias> --tunnel-port <port> [--json]
 ocx link status [--json]
 ocx link revoke --link-id <id> [--json]
+ocx link reconnect --link-id <id> [--json]
 ```
+
+対話型端末（TTY）でない場合、`--expect-fingerprint` は必須です。対話型端末では省略できますが、提示されたフィンガープリントを明示的に承認する必要があります。
 
 ## 関連ガイド
 
 - [Remote Hub のデプロイ](/ja/guides/remote-hub/)
 - [リモートワークスペース](/ja/guides/remote-workspace/)
+
+
+端末では `ocx link probe <alias> --json` で指紋とバージョンを確認し、`ocx link add <alias> --expect-fingerprint SHA256:… --json` で接続できます。指紋を省略すると対話端末で明示的な確認が必要です。Home は Child の再起動サポートと curl を事前確認し、接続後に再起動と実際のリレーを検証します。Child 設定が残った場合は Child で `ocx disconnect` と `ocx restart` を実行してください。[詳細（英語）](/guides/remote-link/#add-a-child-from-the-terminal)。

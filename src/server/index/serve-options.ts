@@ -1,5 +1,7 @@
 import type { Server, ServerWebSocket } from "bun";
+import { modelAliasIdPromoter } from "./model-alias-id";
 import type { StartServerDeps } from "./startup-warnings";
+import { isLinkManagementPath } from "../../link/management-routes";
 import {
   GUI_PAIRING_EXCHANGE_BODY_LIMIT,
   REMOTE_WORKSPACE_PAIRING_BODY_LIMIT,
@@ -96,6 +98,7 @@ import {
   isAllowedManagementOrigin,
   isApiAuthRequired,
   isLoopbackHostname,
+  markTrustedHubManagementRequest,
   jsonResponse,
   admissionFields,
   resolveApiAuth,
@@ -106,6 +109,7 @@ import {
 } from "../auth-cors";
 import { managementSessionIssuance } from "../management-auth";
 import { resolveAdmissionModelScope, routeAllowedByScope } from "../admission-model-scope";
+import { captureAdmissionPolicy } from "../capture-admission-policy";
 import {
   disableResponsesRequestTimeout,
   handleResponses,
@@ -201,10 +205,13 @@ import type { ReadinessGate } from "../readiness";
 import type { WorkflowRefusalLog } from "../workflow-refusal";
 
 import { readyProtocolMetadata } from "../../remote/protocol";
+import { homeInstanceId, stampServedBy } from "../../remote/served-by";
 import { modelCapabilityFields } from "../models-capabilities";
 import { createWebsocketHandler } from "./websocket-handler";
+import { reasoningArchiveErrorResponse } from "../responses/reasoning-archive-error";
 import { withGrokSessionIdentity } from "../../grok/session-identity";
 import { withCallerSessionIdentity } from "../caller-session-identity";
+import { agentAssertionUnsupportedResponse, hasAgentAssertionAuthorization } from "../../lib/authorization-scheme";
 
 export type ServerIngress = "public" | "unauthenticated-loopback" | "hub-management" | "claude-intercept" | "hub-link";
 
@@ -313,6 +320,11 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       maxRequestBodySize: inboundBodyLimitBytes,
       async fetch(req: Request, requestServer: Server<WsData>): Promise<Response> {
       const ingress = ingressForServer(requestServer);
+      // Bind management-origin trust to the actual Bun listener object resolved above.
+      // Neither Host nor any X-Forwarded-* header can manufacture this process-local mark.
+      if (ingress === "hub-management" && config.runtimeRole === "hub") {
+        markTrustedHubManagementRequest(req);
+      }
       const requestUrl = codexCompatibleUrl(req.url);
       const linkPolicyView = ingress === "hub-link" ? linkPolicy() : undefined;
       // The unauthenticated loopback listener (#1102) serves a fixed allowlist and nothing
@@ -361,12 +373,25 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         : ingress === "unauthenticated-loopback" || ingress === "claude-intercept"
           ? loopbackPolicy()
           : config;
+      // Codex runtime agent assertion_only (Authorization: AgentAssertion) is refused before
+      // admission or routing: it is never a bearer, never an admission secret, and no pool or
+      // routed credential may stand in for it.
+      if (hasAgentAssertionAuthorization(req.headers)) return withCors(agentAssertionUnsupportedResponse(), req, policy);
       if (ingress === "hub-link") {
         const admission = resolveApiAuth(req, policy);
         if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
         if (requestUrl.pathname === "/v1/catalog" && requestUrl.search === ""
           && (req.method === "GET" || req.method === "HEAD")
           && admission.kind === "configured") onAuthenticatedCatalog(admission.keyId);
+        // #6957: the Child's read-only view of this Home. Admitted by the link key above and by
+        // the shared table in src/link/management-routes.ts; never reachable on another ingress.
+        if (isLinkManagementPath(requestUrl.pathname)) {
+          const { handleLinkManagementRequest } = await import("./link-management");
+          return withCors(await handleLinkManagementRequest(
+            req, requestUrl, config, requestManagementApiDeps, managementSessionControl,
+            admission.kind === "configured" ? admission.keyId : undefined,
+          ), req, policy);
+        }
       }
       const url = requestUrl;
       const admissionOptions = { linkIngress: policy.linkIngress?.allowedKeyIds };
@@ -393,11 +418,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         const message = "OpenCodex package files changed while this proxy was running; it restarts on its own, or run 'ocx restart' ('ocx service restart' for a background service).";
         const fencedPort = ctx.boundPort ?? requestServer.port ?? listenPort;
         const fencedHealth = url.pathname === "/healthz";
+        const fencedInstanceId = fencedHealth ? homeInstanceId() : undefined;
         const response = fencedHealth || readyzPath !== undefined
           ? jsonResponse({
               status: "restart_required",
               service: "opencodex",
               version: VERSION,
+              ...(fencedInstanceId ? { instanceId: fencedInstanceId } : {}),
               uptime: process.uptime(),
               pid: process.pid,
               port: fencedPort,
@@ -608,10 +635,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       if (url.pathname === "/healthz" && req.method === "GET") {
         // service/pid/port let CLI liveness reject foreign 200s and verify pid identity.
         const healthPort = ctx.server.port ?? listenPort;
+        // Opaque Home instance id (src/remote/served-by.ts); omitted until the identity exists.
+        const instanceId = homeInstanceId();
         const response = jsonResponse({
           status: "ok",
           service: "opencodex",
           version: VERSION,
+          ...(instanceId ? { instanceId } : {}),
           uptime: process.uptime(),
           pid: process.pid,
           port: healthPort,
@@ -924,7 +954,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           }
           throw error;
         }
-        const { accountBoundNativeOpenAiSlugsBySelector, applyNativeVisibility, buildCatalogEntries, configuredNativeAliasSlugs, desktopAllowlistSuppressedNativeSlugs, disabledNativeSlugs, exactComboCatalogSlugs, loadCatalogTemplate, NATIVE_OPENAI_MODELS, nativeContextLimits, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiMaxOutputTokens, nativeOpenAiContextTier, nativeOpenAiSlugs, nativeReasoningEfforts, nativeDefaultReasoningEffort, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, uniqueCatalogModelsForRawPublicList, visibleCodexAccountSelectors, visibleNativeSlugs, desktopVisibleNativeSlugs } = await import("../../codex/catalog");
+        const { accountBoundNativeOpenAiSlugsBySelector, configuredNativeAliasSlugs, desktopAllowlistSuppressedNativeSlugs, disabledNativeSlugs, exactComboCatalogSlugs, NATIVE_OPENAI_MODELS, nativeContextLimits, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiMaxOutputTokens, nativeOpenAiContextTier, nativeOpenAiSlugs, nativeReasoningEfforts, nativeDefaultReasoningEffort, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, uniqueCatalogModelsForRawPublicList, visibleCodexAccountSelectors, visibleNativeSlugs, desktopVisibleNativeSlugs } = await import("../../codex/catalog");
         const { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } = await import("../../codex/catalog/native-models");
         const includeNativeOpenAi = shouldIncludeNativeOpenAi(config);
         const includeAccountBoundNativeOpenAi = shouldIncludeAccountBoundNativeOpenAi(config);
@@ -1040,9 +1070,9 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             config.claudeCode?.desktopProfile,
             desktopInputs.nativeContextCap,
           );
-          const { buildAnthropicModelInfos } = await import("../../claude/model-info");
+          const { buildAnthropicModelInfos, configuredRoutedDisplayName } = await import("../../claude/model-info");
           const { resolveAutoContext } = await import("../../claude/context-windows");
-          const { activeDesktop3pAlias } = await import("../../claude/desktop-3p");
+          const { resolvableDesktop3pAlias } = await import("../../claude/desktop-3p");
           // Per-surface id family (devlog 050): explicit ?ids= wins; otherwise the
           // Claude Code CLI discovery UA (`claude-code/<version>`, binary n_()) gets
           // readable claude-ocx ids and every other client (Desktop 3P) keeps the
@@ -1058,7 +1088,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             goOrdered,
             resolveAutoContext(config.claudeCode),
             idStyle,
-            activeDesktop3pAlias,
+            resolvableDesktop3pAlias,
             desktopInputs.nativeContextCap,
             config.fastMode,
             // Explicit opt-out omits the Fast predicate.
@@ -1068,51 +1098,17 @@ export function createServeOptions(ctx: ServeOptionsContext) {
                   ? nativeFastEligible(model.id)
                   : catalogRowFastEligible(model)
               : undefined,
-            { modelPickerOrder: config.modelPickerOrder, featured: config.subagentModels },
+            { modelPickerOrder: config.modelPickerOrder, featured: config.subagentModels }, configuredRoutedDisplayName(config),
           );
           return jsonResponse({ data }, 200, req, policy);
         }
         if (url.searchParams.has("client_version")) {
-          // Codex client → Codex catalog shape: native gpt + namespaced routed models,
-          // cloned from a native template so required fields (base_instructions, etc.) are present.
-          // Pass the subagent picks so featured models lead by priority (matches the on-disk file).
-          // Disabled natives stay in the catalog shape with visibility "hide" (mirrors the
-          // on-disk sync; codex-rs keeps them out of the picker itself).
-          const maMode = config.multiAgentMode === "v1" || config.multiAgentMode === "v2" ? config.multiAgentMode : "default";
-          // Account rows use the same hidden-inclusive supported set as on-disk sync. This lets a
-          // newly re-enabled native reappear under each selector before the next sync, while the
-          // no-selector path keeps nativeOpenAiSlugs()'s existing visibility-sensitive behavior.
-          const catalogNativeSlugs = accountSelectors.length > 0
-            ? [...new Set([
-              ...availableAccountNativeSlugs,
-              ...accountNativeSlugs,
-            ])]
-            : nativeSlugs;
-          const entries = buildCatalogEntries(
-            loadCatalogTemplate(),
-            catalogNativeSlugs,
-            goOrdered,
-            config.subagentModels,
-            websocketsEnabled(config),
-            maMode as "v1" | "default" | "v2",
-            exactComboSlugs,
-            accountSelectors,
-            suppressedBareNativeSlugs,
-            new Set(),
-            nativeContextLimits(config),
-            accountNativeSlugs,
-            accountNativeSlugsBySelector,
-            config.keepNativeChatGptOnV1 === true,
-            config.modelPickerOrder,
-          );
-          return jsonResponse({
-            models: applyNativeVisibility(
-              entries,
-              disabledModels,
-              accountSelectors.length > 0,
-              new Set(accountNativeSlugs),
-            ),
-          }, 200, req, policy);
+          const { buildCodexModelList } = await import("../codex-model-list");
+          return jsonResponse(buildCodexModelList({
+            config, nativeSlugs, availableAccountNativeSlugs, accountNativeSlugs,
+            accountNativeSlugsBySelector, goOrdered, exactComboSlugs, accountSelectors,
+            suppressedBareNativeSlugs, disabledModels,
+          }), 200, req, policy);
         }
         // OpenAI list shape: native gpt bare + routed models namespaced "<provider>/<id>"
         // (pure availability list — disabled natives are omitted entirely).
@@ -1239,6 +1235,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             effortRowKnownIds,
           ));
         };
+        const promoteAliasId = modelAliasIdPromoter(config);
         const routedRows = await Promise.all(uniqueCatalogModelsForRawPublicList(goOrdered)
           .filter(m => listAllows(m.provider, m.id))
           .map(async m => {
@@ -1256,8 +1253,11 @@ export function createServeOptions(ctx: ServeOptionsContext) {
                 knownModelIdsForProvider(m.provider, provider, config),
               ).get(m.id)
             : undefined;
+          const effectiveId = !isCombo && !fastModelId && effective
+            ? promoteAliasId(m.provider, m.id, effective.alias, catalogRowFastEligible(m)) ?? publicId
+            : publicId;
           const row = {
-            id: publicId,
+            id: effectiveId,
             object: "model",
             created: 0,
             // This endpoint is an OpenAI-compatible inbound contract. Some clients use
@@ -1266,11 +1266,15 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             owned_by: isCombo ? "openai" : (m.owned_by ?? m.provider),
             ...(isCombo ? { is_combo: true } : {}),
             ...(effective ? { alias_of: `${provider?.alias || m.provider}/${effective.alias}` } : {}),
+            // When preferModelAliasIds promotes the alias to `id`, retain the original
+            // provider/nativeId so clients that need the upstream identity can read it.
+            ...(effectiveId !== publicId ? { native_id: publicId } : {}),
             ...grokEffortFields(m.reasoningEfforts ?? [], m.defaultReasoningEffort),
             ...modelCapabilityFields({
+              supportsReasoning: m.supportsReasoning, supportsReasoningEffort: m.supportsReasoningEffort,
+              supportsThinkingToggle: m.supportsThinkingToggle, defaultThinkingEnabled: m.defaultThinkingEnabled,
               reasoningEfforts: m.reasoningEfforts,
-              // contextWindow is already the post-cap effective value; contextCap is the raw
-              // operator knob and over-reports models whose real window sits below it.
+              // Use the post-cap window; the raw contextCap can exceed a model's real window.
               contextWindow: m.contextWindow,
               maxOutputTokens: m.maxOutputTokens,
               inputModalities: m.inputModalities,
@@ -1320,14 +1324,17 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           ...admissionFields(admission),
           inboundProtocol: "responses",
         };
+        const advisorAdmissionPolicy = captureAdmissionPolicy(config, admission);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
           try {
             response = await handleResponsesCompact(req, config, logCtx, turnAdmissionLease, admission, {
+              advisorAdmissionPolicy,
               onRequestBodyRead: () => disableResponsesRequestTimeout(req, requestServer),
             });
-          } catch {
-            response = formatErrorResponse(500, "server_error", "Unexpected compact request failure");
+          } catch (error) {
+            response = reasoningArchiveErrorResponse(error)
+              ?? formatErrorResponse(500, "server_error", "Unexpected compact request failure");
           }
           addFinalRequestLog(requestId, start, logCtx, response.status,
             response.status === 499 ? { closeReason: "client_cancel" } : undefined);
@@ -1478,12 +1485,15 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           addFinalRequestLog(requestId, start, logCtx, status, meta);
         };
         const sessionReq = withCallerSessionIdentity(withGrokSessionIdentity(req), admission);
+        // Capture at authentication: runAdmittedHttpTurn can wait for body capacity first (#7859).
+        const advisorAdmissionPolicy = captureAdmissionPolicy(config, admission);
         return runAdmittedHttpTurn(sessionReq, policy, async turnAdmissionLease => {
           let response: Response;
           try {
             response = await handleResponses(sessionReq, config, logCtx, {
               turnAdmissionLease,
               admission,
+              advisorAdmissionPolicy,
               onRequestBodyRead: () => disableResponsesRequestTimeout(req, requestServer),
               abortSignal: req.signal,
               onFirstOutput: () => recordFirstOutput(logCtx, start),
@@ -1498,6 +1508,10 @@ export function createServeOptions(ctx: ServeOptionsContext) {
               },
             });
           } catch (error) {
+            const archiveError = reasoningArchiveErrorResponse(error);
+            if (archiveError) return withRequestLogId(
+              withCors(responseWithDeferredRequestLog(archiveError, requestId, start, logCtx), req, policy), requestId,
+            );
             // A bounded upstream body can fail before handleResponses returns a client response.
             // Finalize before rethrow so accounting observes the physical send while the caller
             // retains the existing reset/rejection instead of receiving a synthesized response.
@@ -1563,8 +1577,10 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         let ownsRequestLog = false;
         const claimRequestLog = (work: (lease: ActiveTurnLease) => Promise<Response>) =>
           (lease: ActiveTurnLease) => { ownsRequestLog = true; return work(lease); };
+        // Capture at authentication: runAdmittedHttpTurn can wait for body capacity first (#7859).
+        const advisorAdmissionPolicy = captureAdmissionPolicy(config, admission);
         const response = await runAdmittedHttpTurn(sessionReq, policy, claimRequestLog(async turnAdmissionLease => withCors(
-          await handleClaudeMessages(sessionReq, config, logCtx, { requestId, start, turnAdmissionLease, admission }, policy, { claudeIntercept: ingress === "claude-intercept" }),
+          await handleClaudeMessages(sessionReq, config, logCtx, { requestId, start, turnAdmissionLease, admission, advisorAdmissionPolicy }, policy, { claudeIntercept: ingress === "claude-intercept" }),
           req,
           policy,
         )), { requestId, start, logCtx, onLogged: () => { ownsRequestLog = true; } });
@@ -1597,11 +1613,19 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // Promote a caller `x-session-id` before admission, as Responses and Messages do (#6520):
         // the ChatGPT bridge forwards only canonical session headers, so the raw marker is lost.
         const sessionReq = withCallerSessionIdentity(req, admission);
-        return runAdmittedHttpTurn(sessionReq, policy, async turnAdmissionLease => withCors(
-          await handleChatCompletions(sessionReq, config, logCtx, { requestId, start, turnAdmissionLease, admission }),
-          req,
-          policy,
-        ), { requestId, start, logCtx });
+        // Only expose an id when the handler or a logged refusal owns its history row.
+        let ownsRequestLog = false;
+        // Capture at authentication: runAdmittedHttpTurn can wait for body capacity first (#7859).
+        const advisorAdmissionPolicy = captureAdmissionPolicy(config, admission);
+        const response = await runAdmittedHttpTurn(sessionReq, policy, async turnAdmissionLease => {
+          ownsRequestLog = true;
+          return withCors(
+            await handleChatCompletions(sessionReq, config, logCtx, { requestId, start, turnAdmissionLease, admission, advisorAdmissionPolicy }),
+            req,
+            policy,
+          );
+        }, { requestId, start, logCtx, onLogged: () => { ownsRequestLog = true; } });
+        return ownsRequestLog ? withRequestLogId(response, requestId) : response;
       }
 
       if (url.pathname === "/v1/audio/transcriptions" && req.method === "POST") {
@@ -1719,7 +1743,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         if (audioController) registerTurn(audioController, turnAdmissionLease);
         const acquisition = audioController
           ? clearableDeadline(120_000, AbortSignal.any([req.signal, audioController.signal])) : undefined;
-        const detachClientAbort = turnAdmissionLease.bindAbortSignal(req.signal);
+        const detachClientAbort = turnAdmissionLease.bindAbortSignal(req.signal); // detached at the dial; then close/CLOSED owns release
         const releaseAcquisition = () => {
           detachClientAbort();
           acquisition?.clear();
@@ -1772,6 +1796,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           finally { finalizeLiveRequest(499, { closeReason: "client_cancel" }); }
           return withCors(formatErrorResponse(499, "client_closed_request", "Audio connection canceled"), req, policy);
         }
+        detachClientAbort();
         const upstreamHandshake = await openLiveSidebandUpstream(
           resolved.upstreamWsUrl,
           resolved.headers,
@@ -1813,6 +1838,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             ...(audioClient?.protocol ? { headers: { "sec-websocket-protocol": audioClient.protocol } } : {}),
             data: {
               kind: "live-sideband",
+              authContext: resolved.authContext,
               liveUpstream: upstreamHandshake.socket,
               liveUpstreamUrl: resolved.upstreamWsUrl,
               liveUpstreamHeaders: resolved.headers,
@@ -1840,7 +1866,6 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           return withCors(formatErrorResponse(502, "upstream_error", "Audio WebSocket upgrade failed"), req, policy);
         }
         if (upgraded) {
-          detachClientAbort();
           acquisition?.clear();
           finalizeLiveRequest(101);
           return undefined as unknown as Response;
@@ -1944,5 +1969,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
     },
     websocket: createWebsocketHandler(ctx, requestMetrics),
   } as const;
-  return serveOptions;
+  const routeFetch = serveOptions.fetch;
+  // x-opencodex-served-by on GET /v1/models, whichever branch answered (src/remote/served-by.ts).
+  return { ...serveOptions, fetch: async (req: Request, requestServer: Server<WsData>): Promise<Response> =>
+    stampServedBy(req.method, codexCompatibleUrl(req.url).pathname, await routeFetch(req, requestServer)) } as const;
 }

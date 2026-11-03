@@ -173,7 +173,7 @@ describe("#2617/#3378 Muse Spark web_search compatibility", () => {
   test("Contributor Free tiers get the same web_search sanitization", () => {
     for (const modelId of ["muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free"]) {
       const body = build(modelId, { tools: [webSearchTool()] });
-      const tool = toolsOf(body).find(entry => entry.type === "web_search")!;
+      const tool = toolsOf(body)[0]!;
       expect(tool.type).toBe("web_search");
       expect(tool.search_context_size).toBe("medium");
       expect(Object.hasOwn(tool, "search_content_types")).toBe(false);
@@ -199,7 +199,7 @@ describe("#2617/#3378 Muse Spark web_search compatibility", () => {
       const body = build(modelId, {
         tools: [{ ...webSearchTool(), type: "web_search_preview" }],
       });
-      const tool = toolsOf(body).find(entry => entry.type === "web_search_preview")!;
+      const tool = toolsOf(body)[0]!;
       expect(tool.type).toBe("web_search_preview");
       expect(tool.search_content_types).toEqual(["text", "image"]);
       expect(tool.indexed_web_access).toBe(true);
@@ -234,18 +234,19 @@ describe("#2617/#3378 Muse Spark web_search compatibility", () => {
    * same field drop, same preview preservation.
    */
   test("direct Meta strips rejected web_search fields at both tool positions", () => {
-    const body = buildForProvider(META_PROVIDER, "muse-spark-1.3-contributor", {
-      tools: [webSearchTool()],
-      input: [{ type: "additional_tools", tools: [webSearchTool()] }],
-    });
-    const tool = toolsOf(body)[0]!;
-    const item = (body.input as Array<Record<string, unknown>>)[0]!;
-    const nested = (item.tools as Array<Record<string, unknown>>)[0]!;
-    for (const declaration of [tool, nested]) {
+    for (const catalog of [
+      { tools: [webSearchTool()] },
+      { input: [{ type: "additional_tools", tools: [webSearchTool()] }] },
+    ]) {
+      const body = buildForProvider(META_PROVIDER, "muse-spark-1.3-contributor", catalog);
+      // Meta receives either carrier in the public catalog after projection.
+      expect(toolsOf(body)).toHaveLength(1);
+      const declaration = toolsOf(body)[0]!;
       expect(declaration.type).toBe("web_search");
       expect(declaration.search_context_size).toBe("medium");
       expect(Object.hasOwn(declaration, "search_content_types")).toBe(false);
       expect(Object.hasOwn(declaration, "indexed_web_access")).toBe(false);
+      if (Array.isArray(body.input)) expect(body.input).toEqual([]);
     }
   });
 

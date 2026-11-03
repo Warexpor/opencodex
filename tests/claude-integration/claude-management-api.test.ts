@@ -15,12 +15,14 @@ import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/iso
 import { MANAGEMENT_JSON_BODY_MAX_BYTES } from "../../src/server/management/body";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { desktopFirstPartyTarget } from "../../src/claude/desktop-first-party";
+import { isolateClientLifecycleLock } from "../helpers/client-lifecycle-lock";
 
 // Full-suite Windows load: startServer + multi-PUT management flows often exceed bun's
 // default 5s per-test budget (same flake class as 810fa115 / kiro-oauth).
 setDefaultTimeout(30_000);
 
 let testDir = "";
+let lifecycleLock: ReturnType<typeof isolateClientLifecycleLock>;
 let previousHome: string | undefined;
 let previousClaudeConfigDir: string | undefined;
 let previousDesktopConfigDir: string | undefined;
@@ -45,6 +47,7 @@ beforeEach(() => {
   previousDesktopConfigDir = process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR;
   isolatedCodexHome = installIsolatedCodexHome("ocx-claude-mgmt-");
   testDir = mkdtempSync(join(tmpdir(), "ocx-claude-mgmt-"));
+  lifecycleLock = isolateClientLifecycleLock(testDir);
   process.env.OPENCODEX_HOME = testDir;
   // These API tests intentionally toggle agent injection off. Never let that
   // prune the developer's real ~/.claude/agents directory.
@@ -60,6 +63,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  lifecycleLock.restore();
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   if (previousClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
@@ -123,7 +127,8 @@ test("GET classifies settings against the injected bound listener", async () => 
     const get = async () => (await (await fetch(new URL("/api/claude-code", server.url))).json()) as Record<string, unknown>;
     expect(await get()).toMatchObject({ sharedProxy: "none", cliFirstPartyApplied: false,
       desktopFirstParty: false, interceptEligible: true, interceptRunning: false });
-    writeFileSync(settingsPath, JSON.stringify({ env }));
+    // A fully applied block carries the loopback bypass (#6936); without it the block is stale.
+    writeFileSync(settingsPath, JSON.stringify({ env: { ...env, NO_PROXY: "127.0.0.1,localhost,::1,0.0.0.0" } }));
     expect(await get()).toMatchObject({ sharedProxy: "stopped", cliFirstPartyApplied: false });
     bound = { proxyPort: 10200, caCertPath: env.NODE_EXTRA_CA_CERTS, pickerProxyPort: null };
     expect(await get()).toMatchObject({ sharedProxy: "live", cliFirstPartyApplied: true, interceptRunning: true });
@@ -155,7 +160,7 @@ test("GET keeps ineligible bound, stale and stopped states distinct", async () =
   saveConfig(current);
   const settingsPath = join(process.env.CLAUDE_CONFIG_DIR!, "settings.json");
   mkdirSync(process.env.CLAUDE_CONFIG_DIR!, { recursive: true });
-  writeFileSync(settingsPath, JSON.stringify({ env }));
+  writeFileSync(settingsPath, JSON.stringify({ env: { ...env, NO_PROXY: "127.0.0.1,localhost,::1,0.0.0.0" } }));
   let bound: { proxyPort: number; caCertPath: string; pickerProxyPort: null } | null =
     { proxyPort: 10200, caCertPath: env.NODE_EXTRA_CA_CERTS, pickerProxyPort: null };
   const server = startServer(0, { managementApi: { getClaudeInterceptState: () => bound } });

@@ -244,6 +244,14 @@ export const CURSOR_CAPABILITIES: Record<string, CursorCapability> = {
     defaultVariant: "regular",
     variants: { regular: { levels: ["low", "medium", "high"] } },
   },
+  // 261014 preemptive, like gemini-3.8-flash: Cursor's models page lists Gemini 4 Argon, but the
+  // live GetUsableModels id is unverified. Inert until the live roster lists this id.
+  "gemini-4-argon": {
+    displayName: "Gemini 4 Argon",
+    window: CONTEXT_GEMINI,
+    defaultVariant: "regular",
+    variants: { regular: { levels: ["low", "medium", "high"] } },
+  },
   // Seeded from the live GetUsableModels roster attached to #4820, which advertises six
   // muse-spark-1.3 effort variants. The ladder stops at xhigh on purpose: see the matching
   // effort-map entry for why Cursor advertising `-max` is not evidence that it runs.
@@ -465,9 +473,11 @@ export function parseCursorVariantId(rawId: string): ParsedCursorVariantId {
   }
   let thinking = false;
   let level: string | undefined;
-  const thinkingLevel = /^(.*)-thinking-([a-z-]+)$/.exec(stem);
-  if (thinkingLevel && CURSOR_CAPABILITIES[thinkingLevel[1]!] && (LEVEL_TOKENS as readonly string[]).includes(thinkingLevel[2]!)) {
-    return finishParse(thinkingLevel[1]!, true, fast, thinkingLevel[2]!);
+  const thinkingAt = stem.lastIndexOf("-thinking-");
+  const thinkingBase = thinkingAt < 0 ? "" : stem.slice(0, thinkingAt);
+  const thinkingLevel = thinkingAt < 0 ? "" : stem.slice(thinkingAt + "-thinking-".length);
+  if (/^[a-z-]+$/.test(thinkingLevel) && CURSOR_CAPABILITIES[thinkingBase] && (LEVEL_TOKENS as readonly string[]).includes(thinkingLevel)) {
+    return finishParse(thinkingBase, true, fast, thinkingLevel);
   }
   const levelThinking = stem.endsWith("-thinking") ? stripLevelSuffix(stem.slice(0, -"-thinking".length)) : undefined;
   if (levelThinking && CURSOR_CAPABILITIES[levelThinking.stem]) {

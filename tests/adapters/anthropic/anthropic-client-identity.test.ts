@@ -4,6 +4,7 @@ import { shouldPreserveNativeClientPreamble } from "../../../src/adapters/anthro
 import { buildAnthropicMessagesPassthroughRequest } from "../../../src/adapters/anthropic/passthrough";
 import { createAnthropicAdapter } from "../../../src/adapters/anthropic";
 import { claudeCodeSessionId } from "../../../src/adapters/client-fingerprint";
+import { CLAUDE_CLI_SDK_PACKAGE_VERSION, CLAUDE_CLI_USER_AGENT } from "../../../src/providers/claude-cli-identity";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
 
 const SESSION = "11111111-1111-4111-8111-111111111111";
@@ -24,7 +25,7 @@ const build = (clientIdentity: AnthropicClientIdentity | undefined, overrides: P
 
 describe("observed Claude Code identity", () => {
   test("known CLI and SDK entrypoints carry the coherent observed bundle", () => {
-    for (const entrypoint of ["cli", "sdk-cli", "sdk"]) {
+    for (const entrypoint of ["cli", "sdk-cli", "sdk", "sdk-ts"]) {
       const userAgent = `claude-cli/2.1.288 (external, ${entrypoint})`;
       const identity = captureAnthropicClientIdentity(new Headers({ ...observed, "User-Agent": userAgent }));
       expect(hasObservedAnthropicClientIdentity(identity)).toBe(true);
@@ -35,6 +36,35 @@ describe("observed Claude Code identity", () => {
     }
     expect(hasObservedAnthropicClientIdentity(undefined)).toBe(false);
     expect(hasObservedAnthropicClientIdentity({} as AnthropicClientIdentity)).toBe(false);
+  });
+  test("TypeScript Agent SDK identity retains native feature betas and output_config", () => {
+    const userAgent = "claude-cli/2.1.296 (external, sdk-ts)";
+    const clientIdentity = captureAnthropicClientIdentity(new Headers({ ...observed, "User-Agent": userAgent }));
+    const betas = ["per-turn-control-2026-07-01", "advisor-tool-2026-03-01", "inline-tools-2026-09-15",
+      "prompt-caching-scope-2026-01-05", "mid-conversation-system-2026-04-07"];
+    const output_config = { effort: "high" };
+    const built = buildAnthropicMessagesPassthroughRequest(provider, "m", { ...body, output_config }, undefined,
+      { clientIdentity, callerAnthropicBeta: betas.join(",") });
+    expect(new Headers(built.headers).get("user-agent")).toBe(userAgent);
+    expect(new Headers(built.headers).get("x-claude-code-session-id")).toBe(SESSION);
+    for (const beta of betas) expect(built.headers["anthropic-beta"].split(",")).toContain(beta);
+    expect(built.droppedBetas).toBe(false);
+    expect(JSON.parse(built.body).output_config).toEqual(output_config);
+  });
+  test("TypeScript Agent SDK still requires every identity header", () => {
+    for (const name of ["User-Agent", "X-App", "X-Claude-Code-Session-Id", "X-Stainless-Lang", "X-Stainless-Runtime"]) {
+      const headers = new Headers({ ...observed, "User-Agent": "claude-cli/2.1.296 (external, sdk-ts)" });
+      headers.delete(name);
+      expect(captureAnthropicClientIdentity(headers)).toBeUndefined();
+    }
+  });
+  test("TypeScript Agent SDK rejects malformed, duplicate and oversized user agents", () => {
+    const userAgent = "claude-cli/2.1.296 (external, sdk-ts)";
+    for (const value of ["claude-cli/2.1.296 (external, sdk-ts", "claude-cli/2.1.296 (external, sdk-ts extra)",
+      `prefix ${userAgent}`, `${userAgent} trailing`, `${userAgent}, ${userAgent}`,
+      `claude-cli/${"x".repeat(513)} (external, sdk-ts)`]) {
+      expect(captureAnthropicClientIdentity(new Headers({ ...observed, "User-Agent": value }))).toBeUndefined();
+    }
   });
   test("account switch and refresh change only serving auth, not genuine session headers", () => {
     const identity = captureAnthropicClientIdentity(new Headers(observed));
@@ -84,12 +114,12 @@ describe("observed Claude Code identity", () => {
     headers.append("X-Stainless-Package-Version", "1.0.0");
     const built = build(captureAnthropicClientIdentity(headers));
     expect(built.headers["X-Stainless-Runtime-Version"]).not.toBe("x".repeat(513));
-    expect(built.headers["X-Stainless-Package-Version"]).toBe("0.74.0");
-    expect(build({} as AnthropicClientIdentity).headers["User-Agent"]).toBe("@anthropic-ai/sdk/0.74.0");
+    expect(built.headers["X-Stainless-Package-Version"]).toBe(CLAUDE_CLI_SDK_PACKAGE_VERSION);
+    expect(build({} as AnthropicClientIdentity).headers["User-Agent"]).toBe(CLAUDE_CLI_USER_AGENT);
   });
   test("compatible destinations keep defaults; first-party keys retain real caller identity", () => {
     const identity = captureAnthropicClientIdentity(new Headers(observed));
-    expect(build(identity, { authMode: "key", baseUrl: "https://anthropic.example" }).headers["User-Agent"]).toBe("@anthropic-ai/sdk/0.74.0");
+    expect(build(identity, { authMode: "key", baseUrl: "https://anthropic.example" }).headers["User-Agent"]).toBe(`@anthropic-ai/sdk/${CLAUDE_CLI_SDK_PACKAGE_VERSION}`);
     const key = new Headers(build(identity, { authMode: "key" }).headers);
     expect(key.get("user-agent")).toBe(UA);
     expect(key.get("x-api-key")).toBe(provider.apiKey!);
@@ -112,7 +142,7 @@ describe("observed Claude Code identity", () => {
   test("generated Responses adapter traffic keeps its existing compatibility fingerprint", async () => {
     const parsed = { modelId: "m", stream: false, options: {}, context: { messages: [{ role: "user", content: "fixture" }], systemPrompt: [] } } as unknown as OcxParsedRequest;
     const built = await createAnthropicAdapter(provider).buildRequest(parsed);
-    expect(built.headers["User-Agent"]).toBe("@anthropic-ai/sdk/0.74.0");
+    expect(built.headers["User-Agent"]).toBe(CLAUDE_CLI_USER_AGENT);
     expect(built.headers["X-Claude-Code-Session-Id"]).toBe(claudeCodeSessionId(provider.apiKey));
   });
 });
@@ -135,7 +165,10 @@ describe("native Claude system preamble", () => {
       const before = JSON.stringify(system);
       const clientIdentity = captureAnthropicClientIdentity(new Headers(observed));
       const built = buildAnthropicMessagesPassthroughRequest(provider, "m", { ...body, system }, undefined, { clientIdentity });
-      expect(JSON.parse(built.body).system).toEqual(system);
+      // Order and markers survive; the TTL-less marker takes the first-party 1h default.
+      expect(JSON.parse(built.body).system).toEqual([
+        system[0], system[1], { ...system[2], cache_control: { type: "ephemeral", ttl: "1h" } },
+      ]);
       expect(JSON.stringify(system)).toBe(before);
     }
   });

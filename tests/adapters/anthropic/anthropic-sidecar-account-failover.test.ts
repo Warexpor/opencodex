@@ -24,6 +24,7 @@ let releaseSpendHome: (() => void) | undefined;
 let handleResponses: typeof import("../../../src/server/responses")["handleResponses"];
 let observedKeys: string[] = [];
 let sidecarMode = false;
+let restoreModuleMocks: (() => void) | undefined;
 
 function fixtureAdapter(provider: OcxProviderConfig): ProviderAdapter {
   return {
@@ -43,7 +44,13 @@ function fixtureAdapter(provider: OcxProviderConfig): ProviderAdapter {
 }
 
 beforeAll(async () => {
-  const actualResolver = await import("../../../src/server/adapter-resolve");
+  // Capture values: Bun's module namespaces are live and mock.restore() only restores spies.
+  const actualResolver = { ...await import("../../../src/server/adapter-resolve") };
+  const actualWebSearch = { ...await import("../../../src/web-search") };
+  restoreModuleMocks = () => {
+    mock.module("../../../src/server/adapter-resolve", () => actualResolver);
+    mock.module("../../../src/web-search", () => actualWebSearch);
+  };
   const actualResolveAdapter = actualResolver.resolveAdapter;
   mock.module("../../../src/server/adapter-resolve", () => ({
     ...actualResolver,
@@ -71,14 +78,14 @@ beforeAll(async () => {
       parsed: OcxParsedRequest;
       adapter: ProviderAdapter;
       incomingMeta: IncomingMeta;
-      fetchForRequest: (request: AdapterRequest, parsed: OcxParsedRequest) => typeof fetch;
+      fetchForRequest: (request: AdapterRequest, parsed: OcxParsedRequest, adapter: ProviderAdapter) => typeof fetch;
       on429?: (retryAfter: string | null, headers: Headers, parsed: OcxParsedRequest, response: Response) => Promise<
         { adapter: ProviderAdapter; recoveryKind: AttemptRecoveryKind } | null
       >;
     }) => {
       // This is a dispatch seam test. The real loop is covered in anthropic-quota-dispatch.
       const first = await args.adapter.buildRequest(args.parsed, args.incomingMeta);
-      const refused = await args.fetchForRequest(first, args.parsed)(first.url, {
+      const refused = await args.fetchForRequest(first, args.parsed, args.adapter)(first.url, {
         method: first.method, headers: first.headers, body: first.body,
       });
       expect(refused.status).toBe(429);
@@ -91,7 +98,7 @@ beforeAll(async () => {
       // proven end to end rather than against a hand-written stub.
       expect(rotated.recoveryKind).toBe("anthropic-oauth-429");
       const second = await rotated.adapter.buildRequest(args.parsed, args.incomingMeta);
-      return args.fetchForRequest(second, args.parsed)(second.url, {
+      return args.fetchForRequest(second, args.parsed, rotated.adapter)(second.url, {
         method: second.method, headers: second.headers, body: second.body,
       });
     },
@@ -128,6 +135,7 @@ afterAll(() => {
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   mock.restore();
+  restoreModuleMocks?.();
 });
 
 test("Anthropic sidecar dispatch seam records A429 and B200 when proactive pooling is disabled", async () => {

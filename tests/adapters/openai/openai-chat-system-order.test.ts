@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createOpenAIChatAdapter } from "../../../src/adapters/openai-chat";
 import { anthropicToResponsesBody } from "../../../src/claude/inbound";
 import { parseRequest } from "../../../src/responses/parser";
+import { enrichProviderFromRegistry, providerConfigSeed } from "../../../src/providers/derive";
+import { getProviderRegistryEntry } from "../../../src/providers/registry";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
 
 const provider: OcxProviderConfig = {
@@ -157,6 +159,37 @@ describe("chronological in-conversation system messages", () => {
     expect(next.tools).toEqual(first.tools);
     expect(next.model).toBe(model);
     expect(next.stream).toBe(true);
+  });
+
+  test("LM Studio's single-system default hoists reminders; explicit false preserves the prefix", () => {
+    const entry = getProviderRegistryEntry("lm-studio")!;
+    const defaultProvider = providerConfigSeed(entry);
+    const chronologicalProvider = { ...providerConfigSeed(entry), singleLeadingSystemMessage: false };
+    enrichProviderFromRegistry("lm-studio", chronologicalProvider);
+    expect(defaultProvider.singleLeadingSystemMessage).toBe(true);
+    expect(chronologicalProvider.singleLeadingSystemMessage).toBe(false);
+
+    const extended = [
+      ...history,
+      { role: "assistant", content: "Second result." },
+      { role: "user", content: "Continue." },
+      { role: "system", content: "Synthetic reminder B." },
+    ];
+    const firstDefault = build(history, defaultProvider).messages;
+    const nextDefault = build(extended, defaultProvider).messages;
+    const firstChronological = build(history, chronologicalProvider).messages;
+    const nextChronological = build(extended, chronologicalProvider).messages;
+    const stableInstructions = firstChronological[0].content;
+    expect(stableInstructions).toStartWith("Stable project instructions.");
+    expect(firstDefault[0]).toEqual({ role: "system", content: `${stableInstructions}\n\nSynthetic reminder A.` });
+    expect(nextDefault[0]).toEqual({ role: "system", content: `${stableInstructions}\n\nSynthetic reminder A.\n\nSynthetic reminder B.` });
+    expect(nextDefault.filter((message: { role: string }) => message.role === "system")).toHaveLength(1);
+    expect(JSON.stringify(nextDefault.slice(0, firstDefault.length))).not.toBe(JSON.stringify(firstDefault));
+
+    expect(JSON.stringify(nextChronological.slice(0, firstChronological.length))).toBe(JSON.stringify(firstChronological));
+    expect(firstChronological[0]).toEqual({ role: "system", content: stableInstructions });
+    expect(firstChronological.at(-1)).toEqual({ role: "system", content: "Synthetic reminder A." });
+    expect(nextChronological.at(-1)).toEqual({ role: "system", content: "Synthetic reminder B." });
   });
 
   test("defers reminders until pending tool results have arrived without losing reasoning", () => {

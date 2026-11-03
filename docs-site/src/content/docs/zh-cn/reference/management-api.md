@@ -79,7 +79,7 @@ Authorization: Bearer <admin-token>
 
 无法确认兑换结果时，返回 HTTP 502、`error.code: "attempt_unresolved"` 和实际的 `operationId`。请保留该 ID；新 ID 会启动另一项操作。CLI 在发送前生成 ID，并在请求送达或响应不确定时提示保留同一个 `--operation-id`。第一版账本的旧 `open` 记录和结果未确认的 `redeem_failed` 记录会被隔离为不确定尝试，不允许再次兑换。
 
-在 **Providers > xAI Grok > Accounts** 中，每个账号的票据徽章可查看剩余优惠券及有效期。对话框发送客户端生成的 `operationId`。请求送达或结果不确定时，账号控制器在保持挂载期间保留同一次尝试，关闭并重新打开对话框也会保留。刷新只发送 GET，不允许额外的兑换 POST。对应的终端命令是 `ocx account grok-reset-coupons`。
+在 **Providers > xAI Grok > Accounts** 中，每个账号的票据徽章可查看剩余优惠券及有效期。对话框发送客户端生成的 `operationId`。请求送达或结果不确定时，仪表板会在浏览器标签页会话期间保留同一次尝试，关闭并重新打开对话框、切换页面或重新加载后也会保留。该记录在发送请求之前写入，只有收到同一 `operationId` 的确定响应时才会清除。刷新只发送 GET，不允许额外的兑换 POST。对应的终端命令是 `ocx account grok-reset-coupons`。
 
 Claude 用量重置同样可以从 **Providers > Anthropic > Accounts** 操作。每个已登录账号行都带有显示剩余重置次数的票据徽章，对话框会在再次确认后使用一次重置机会。重置会恢复 5 小时和每周用量额度，但不会改变每周额度的重置日期。如果请求未及时返回结果，对话框会保留其 `operationId`，并在十分钟内提供使用同一 ID 重试的选项；Claude Code 客户端也以此方式恢复。在此期间，同一重置机会的新操作会被拒绝。重置机会只能通过仪表板使用：仅凭管理员令牌会收到 `403 session_required`。
 
@@ -164,6 +164,7 @@ Aside 配置档的变更在这种情况下仍会保存一件事：确认之后�
 | `GET /api/config` | 返回已脱敏、对管理安全的配置 DTO | — |
 | `PUT /api/config` | 禁用的完整配置替换保护 | 405；请改用聚焦端点 |
 | `GET, PUT /api/settings` | 读取运行时/启动设置，或更新自动启动、流模式、应用拥有的内存预算和 `codexAccountPickerEnabled` | 400 无效、非对象或空更新 |
+| `GET, PUT /api/native-reasoning-retention` | 读取模型/账号推理保留开关；部分 PUT 保留未提交字段，JSON `null` 恢复默认值。见 [原生推理密文保留](/zh-cn/reference/configuration/#原生推理密文保留)。 | 400 未知字段、无效类型或非对象/非 null 输入 |
 | `GET /api/startup-health` | 读取缓存的服务/shim 启动健康状态 | — |
 | `POST /api/startup-action` | 安装或修复服务或 Codex shim | 400 无效动作；500 动作失败 |
 | `GET, POST /api/windows-tray` | 读取 Windows 托盘状态，或安装、启动、停止、卸载它 | 400 不支持的平台/动作；500 操作失败 |

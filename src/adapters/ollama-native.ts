@@ -31,6 +31,7 @@ import {
 } from "../lib/translator-budget";
 import { redactSecretString, SENSITIVE_KEY_PATTERN } from "../lib/redact";
 import { parseDataUrl } from "./image";
+import { jsonStringPartsUtf8Bytes, jsonUtf8Bytes } from "../lib/json-byte-size";
 import {
   ollamaNativeChatUrl,
   ollamaNativeEndpointKind,
@@ -110,6 +111,21 @@ const NATIVE_THINK_VALUES = new Set(["low", "medium", "high", "max"]);
 const NATIVE_TOOL_ID_MAX_LENGTH = 256;
 const NATIVE_TOOL_NAME_MAX_BYTES = 1024;
 const NATIVE_MAX_PENDING_TOOL_CALLS = 128;
+const NATIVE_MAX_LATE_ATTRIBUTION_BYTES = 256 * 1024;
+/** Proxy-owned refusal text for an exhausted late-attribution budget. A compaction on the same
+ *  Ollama route resends the same history, so the only reliable recovery is a new thread. */
+export const OLLAMA_LATE_ATTRIBUTION_LIMIT_MESSAGE =
+  "Late tool-output attribution for this conversation exceeded the 256 KiB per-request limit. Start a new thread to continue.";
+
+/** The late-attribution budget refusal, reporting the full limit rather than the bytes left. */
+export class OllamaLateAttributionBudgetError extends TranslatorBudgetExceededError {
+  readonly publicMessage = OLLAMA_LATE_ATTRIBUTION_LIMIT_MESSAGE;
+
+  constructor() {
+    super("request_copies", NATIVE_MAX_LATE_ATTRIBUTION_BYTES);
+    this.name = "OllamaLateAttributionBudgetError";
+  }
+}
 // Account for the retained Map key and call bookkeeping in addition to the provider's name.
 const NATIVE_TOOL_CALL_BOOKKEEPING_BYTES = 128;
 const NATIVE_TOOL_ID_CONTROL = /[\u0000-\u001f\u007f]/u;
@@ -274,6 +290,7 @@ function contentToNative(
       text += part.text;
       continue;
     }
+    if (part.type === "audio") throw new Error(`ollama-native cannot send audio content in ${label}`);
     // Ollama's native /api/chat message shape carries `images: string[]` and has no video
     // counterpart, so a video part is refused rather than silently dropped or mis-sent as an image.
     if (part.type === "video") throw new Error(`ollama-native cannot send video content in ${label}`);
@@ -325,6 +342,7 @@ function buildNativeMessages(
   reservedToolCallIds.clear();
   let pending: PendingToolBatch | undefined;
   const issuedCalls = new Map<string, PendingToolCall>();
+  let lateAttributionBytes = 0;
   // Codex records mid-turn injections (a PostToolUse hook verdict, a context notice) between an
   // assistant tool call and that call's own tool result. Native Ollama needs the call and its
   // results adjacent, so those conversational messages wait here instead of closing the batch
@@ -392,9 +410,20 @@ function buildNativeMessages(
         // Reopening a settled batch would split a later call/result pair. Keep known late
         // output explicitly attributed as conversation text instead of dropping it or
         // fabricating another executable call. Unknown/mismatched identities still fail above.
+        // Generated attribution is not present in the inbound size estimate. Reserve its
+        // JSON wire bytes before joining strings, across all late outputs and all calls.
+        // Count the joined JSON string exactly, without constructing a measurement copy.
+        const attribution = ['[ocx] additional output for previously issued tool "',
+          call.wireName, '" (', call.id, '):\n', message.isError ? "ERROR: " : ""];
+        try {
+          lateAttributionBytes += jsonStringPartsUtf8Bytes(attribution, NATIVE_MAX_LATE_ATTRIBUTION_BYTES - lateAttributionBytes);
+        } catch (error) {
+          if (error instanceof TranslatorBudgetExceededError) throw new OllamaLateAttributionBudgetError();
+          throw error;
+        }
         const translated = contentToNative(message.content, "late tool result");
         const late: OllamaNativeMessage = { role: "user",
-          content: `[ocx] additional output for previously issued tool "${call.wireName}" (${call.id}):\n${message.isError ? "ERROR: " : ""}${translated.content}`,
+          content: attribution.join("") + translated.content,
           ...(translated.images ? { images: translated.images } : {}),
         };
         if (pending) deferred.push(late);
@@ -1022,7 +1051,6 @@ async function* parseOllamaNativeStream(
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  const encoder = new TextEncoder();
   const state = streamState(allowParallelToolCalls);
   const issuedIds = issuedToolCallIds ?? new Set<string>();
   let buffer = "";
@@ -1031,15 +1059,20 @@ async function* parseOllamaNativeStream(
 
   const ingest = function* (text: string): Generator<AdapterEvent> {
     if (!text) return;
+    const hasNewline = text.includes("\n");
     buffer += text;
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
+    // After draining, the carry contains no newline. Only new text can complete a record.
+    const lines = hasNewline ? buffer.split("\n") : [];
+    if (hasNewline) buffer = lines.pop() ?? "";
     // The safety bound applies to the genuinely retained residual — the incomplete NDJSON record
     // still being assembled — and to each complete record below. It must never depend on the
     // transport read size (one read may carry many valid records) nor transiently charge
     // old + replacement together. On a ceiling violation the old reservation is left in place so
     // the generator's finally releases exactly what is held.
-    const residualBytes = encoder.encode(buffer).byteLength;
+    // TextDecoder emits complete code points; fragment byte counts add without a surrogate fixup.
+    const residualBytes = hasNewline
+      ? Buffer.byteLength(buffer, "utf8")
+      : bufferBytes + Buffer.byteLength(text, "utf8");
     if (residualBytes > TRANSLATOR_MAX_SSE_EVENT_BYTES) {
       throw new TranslatorBudgetExceededError("live_transient", TRANSLATOR_MAX_SSE_EVENT_BYTES);
     }
@@ -1048,7 +1081,7 @@ async function* parseOllamaNativeStream(
 
     for (const rawLine of lines) {
       const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-      const lineBytes = encoder.encode(line).byteLength;
+      const lineBytes = Buffer.byteLength(line, "utf8");
       if (lineBytes > TRANSLATOR_MAX_SSE_EVENT_BYTES) {
         throw new TranslatorBudgetExceededError("live_transient", TRANSLATOR_MAX_SSE_EVENT_BYTES);
       }
@@ -1083,7 +1116,7 @@ async function* parseOllamaNativeStream(
       yield* ingest(decoder.decode());
     if (!state.terminal && buffer.length > 0) {
       const rawLine = buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer;
-      const lineBytes = encoder.encode(rawLine).byteLength;
+      const lineBytes = Buffer.byteLength(rawLine, "utf8");
       if (lineBytes > TRANSLATOR_MAX_SSE_EVENT_BYTES) throw new TranslatorBudgetExceededError("live_transient", TRANSLATOR_MAX_SSE_EVENT_BYTES);
       try {
         // The EOF record keeps its residual charge while it is parsed and consumed — releasing it

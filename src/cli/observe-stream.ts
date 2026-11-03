@@ -14,6 +14,8 @@ export interface ObserveStreamDeps extends RuntimeApiDeps {
   /** Reduced timings for isolated tests only; never command-line options. */
   pollIntervalMs?: number;
   requestTimeoutMs?: number;
+  /** Frozen clock for usage-compare tests; never a command-line option. */
+  now?: () => number;
 }
 
 export class ObservationError extends Error {}
@@ -89,7 +91,12 @@ export async function withObserveStream(
       // Snapshot recovery comes from our observed target, never arbitrary transport text.
       if (context.kind === "snapshot") {
         if (!found) throw new ObservationError("Proxy is not running. Start it with: ocx start");
-        if (found.role === "client") throw new ObservationError("This listener runs in the client role and has no management API. Run this command on its serving hub, or open the hub dashboard.");
+        if (found.role === "client") {
+          const { readLinkChildContext, linkChildRefusal } = await import("./link-child");
+          const link = readLinkChildContext();
+          throw new ObservationError(link ? linkChildRefusal(link)
+            : "This listener runs in the client role and has no management API. Run this command on its serving hub, or open the hub dashboard.");
+        }
       }
       return found;
     } }), signal);

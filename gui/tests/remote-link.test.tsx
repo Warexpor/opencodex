@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Window } from "happy-dom";
 import type { Root } from "react-dom/client";
 import { act } from "react";
@@ -24,9 +24,14 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  if (root) await act(async () => { root?.unmount(); });
-  root = null;
-  for (const key of globals) Object.defineProperty(globalThis, key, { configurable: true, value: previous[key] });
+  try {
+    if (root) await act(async () => { root?.unmount(); });
+  } finally {
+    root = null;
+    try { await win.happyDOM.close(); } finally {
+      for (const key of globals) Object.defineProperty(globalThis, key, { configurable: true, value: previous[key] });
+    }
+  }
 });
 
 function response(body: unknown, status = 200): Response { return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }); }
@@ -51,10 +56,15 @@ async function mount(props: Partial<React.ComponentProps<typeof RemoteLink>> = {
   return host;
 }
 
-test("LINK_ERROR_CODES stays in exact parity with link-routes.ts", async () => {
-  const source = await Bun.file("../src/server/management/link-routes.ts").text();
-  const fromRoutes = [...source.matchAll(/fail\("([a-z_]+)"/g)].map(match => match[1]).filter((value, index, all) => all.indexOf(value) === index).sort();
-  expect([...LINK_ERROR_CODES].sort()).toEqual(fromRoutes);
+test("current translated link errors remain implemented across route and enrollment owners", async () => {
+  const source = (await Promise.all(["link-routes", "link-enrollment", "link-route-state"].map(name =>
+    Bun.file(`../src/server/management/${name}.ts`).text()))).join("\n");
+  const fromRoutes = [...source.matchAll(/(?:fail\(|remoteFailure\([^,\n]+,\s*)"([a-z_]+)"/g)].map(match => match[1]).filter((value, index, all) => all.indexOf(value) === index).sort();
+  // New phase errors use generic text. These two old-server translations remain compatible
+  // although enrollment now reports child_relay_timeout and phase-specific failures instead.
+  const legacyOnly = new Set(["admission_timeout", "link_apply_failed"]);
+  expect(fromRoutes.filter(code => (LINK_ERROR_CODES as readonly string[]).includes(code))).toEqual(
+    LINK_ERROR_CODES.filter(code => !legacyOnly.has(code)).sort());
 });
 
 test("parses every wire state without changing the DTO", () => {
@@ -535,6 +545,61 @@ test("disconnect failure opens force confirmation and sends force body", async (
   expect(calls.some(call => call.method === "DELETE" && call.body === JSON.stringify({ force: true }))).toBe(true);
 });
 
+test("Retry on a failed Home link restarts its tunnel instead of only re-reading status", async () => {
+  const calls: Array<{ method: string; path: string }> = [];
+  let state: "failed" | "connecting" = "failed";
+  globalThis.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    calls.push({ method: init?.method ?? "GET", path });
+    if (path === "/api/link/status") return response({ ...baseStatus, links: [
+      { id: "link-1", alias: "child", direction: "hub-initiated", state, since: "now", reason: state === "failed" ? "timeout" : null, tunnelPort: 43110 },
+      { id: "link-2", alias: "home", direction: "client-initiated", state: "failed", since: "now", reason: "timeout", tunnelPort: 43111 },
+    ] });
+    if (path === "/api/link/link-1/reconnect" && init?.method === "POST") { state = "connecting"; return response({ linkId: "link-1" }); }
+    return response({ error: { code: "link_not_home_initiated" } }, 409);
+  }) as typeof fetch;
+  const host = await mount();
+  const retry = [...host.querySelectorAll("button")].find(button => button.textContent === "Retry") as HTMLButtonElement;
+  await act(async () => { retry.click(); });
+  await settleUntil(() => host.querySelector(".remote-link-status[data-state='connecting']") !== null);
+  expect(calls.filter(call => call.method === "POST").map(call => call.path)).toEqual(["/api/link/link-1/reconnect"]);
+  // The page also hosts the per-device fallback panel, whose own GET /api/fallback may land
+  // after the refresh; the link flow's last request is still the status re-read.
+  expect(calls.filter(call => call.path.startsWith("/api/link")).at(-1)).toEqual({ method: "GET", path: "/api/link/status" });
+  expect(host.querySelector(".remote-link-status[data-state='connecting']")).not.toBeNull();
+});
+
+test.each([false, true])("Retry stays disabled through the deferred refresh (POST fails: %s)", async postFails => {
+  const failed = { ...baseStatus, links: [{ id: "link-1", alias: "child", direction: "hub-initiated", state: "failed", since: "now", reason: "timeout", tunnelPort: 43110 }] };
+  let release!: (value: Response) => void;
+  const refreshed = new Promise<Response>(resolve => { release = resolve; });
+  let posts = 0;
+  let gets = 0;
+  globalThis.fetch = (async (input, init) => {
+    if (init?.method === "POST") {
+      posts += 1;
+      return postFails ? response({ error: { code: "link_unavailable" } }, 503) : response({ linkId: "link-1" });
+    }
+    // Count only the link status reads; the fallback panel's GET is a separate resource.
+    if (new URL(String(input)).pathname !== "/api/link/status") return response({ error: "not_found" }, 404);
+    gets += 1;
+    return gets === 1 ? response(failed) : refreshed;
+  }) as typeof fetch;
+  const host = await mount();
+  const retry = [...host.querySelectorAll("button")].find(button => button.textContent === "Retry") as HTMLButtonElement;
+  await act(async () => { retry.click(); });
+  await settleUntil(() => gets === 2);
+  try {
+    expect(retry.disabled).toBe(true);
+    await act(async () => { retry.click(); });
+    expect(posts).toBe(1);
+  } finally {
+    release(response(failed));
+    await flush();
+  }
+  expect(retry.disabled).toBe(false);
+});
+
 test("readLinkJson preserves unknown server codes and status", async () => {
   let caught: unknown;
   try { await readLinkJson(new Response(JSON.stringify({ error: { code: "future_code" } }), { status: 418 })); } catch (error) { caught = error; }
@@ -822,6 +887,51 @@ async function enterAlias(sheet: HTMLElement, value: string): Promise<void> {
     input.dispatchEvent(new win.Event("input", { bubbles: true }));
   });
 }
+
+test.each(["close", "unmount"] as const)("pending sheet focus is cancelled on %s", async transition => {
+  type Timer = ReturnType<Window["setTimeout"]>;
+  const pending = new Map<Timer, () => void>();
+  const schedule = win.setTimeout.bind(win);
+  const cancel = win.clearTimeout.bind(win);
+  const timers = spyOn(win, "setTimeout").mockImplementation((callback, delay = 0, ...args) => {
+    if (delay !== 0) return schedule(callback, delay, ...args);
+    const timer = {} as Timer;
+    pending.set(timer, () => callback(...args));
+    return timer;
+  });
+  const cancellations = spyOn(win, "clearTimeout").mockImplementation(timer => {
+    if (!pending.delete(timer)) cancel(timer);
+  });
+  globalThis.fetch = (async input => response(String(input).endsWith("/candidates") ? { candidates: [] } : baseStatus)) as typeof fetch;
+  try {
+    const host = await mount();
+    const sheet = await openHomeSheet(host);
+    const trigger = [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Add child"))!;
+    expect(pending.size).toBe(1);
+    // Prove the held callback is live and still gives an open sheet its initial focus.
+    for (const [timer, callback] of pending) { pending.delete(timer); callback(); }
+    expect(win.document.activeElement).toBe(sheet.querySelector("input, button"));
+    await act(async () => { sheet.dispatchEvent(new win.Event("cancel", { cancelable: true })); });
+    expect(win.document.activeElement).toBe(trigger);
+    await act(async () => { trigger.click(); });
+    expect(pending.size).toBe(1);
+    if (transition === "close") {
+      await act(async () => { sheet.dispatchEvent(new win.Event("cancel", { cancelable: true })); });
+    } else {
+      await act(async () => { root?.unmount(); });
+      root = null;
+    }
+    // Check cancellation before draining; executing an uncancelled timer cannot make this pass.
+    expect(pending.size).toBe(0);
+    for (const callback of pending.values()) callback();
+    if (transition === "close") expect(win.document.activeElement).toBe(trigger);
+  } finally {
+    if (root) await act(async () => { root?.unmount(); });
+    root = null;
+    timers.mockRestore();
+    cancellations.mockRestore();
+  }
+});
 
 test("discovery loading, empty setup and rescan retain keyboard-accessible manual entry", async () => {
   let complete!: (value: Response) => void;

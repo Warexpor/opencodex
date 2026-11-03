@@ -5,26 +5,29 @@ import { applyRemoteDesktopStore, inspectRemoteDesktopCleanup, restoreRemoteDesk
 import { canonicalDirectory } from "./desktop-remote-store-io";
 import {
   resolveDesktop3pConfigLibraryPath, parseMetadata, SAFE_DESKTOP_PROFILE_ID, isRecord,
-  isOwnedDesktopEntry, isOwnedDesktopGatewayEntry, profilePath, readDesktopProfileForeignKeys,
+  isOwnedDesktopEntry, isOwnedDesktopGatewayEntry, profilePath, readDesktopProfileSnapshot, readDesktopLibraryText, readDesktopLibraryBytes,
+  readOptionalDesktopLibraryBytes, assertDesktopLibraryTextSize, serializeDesktopLibraryJson,
   type Desktop3pConfigLibraryOptions, type Desktop3pMetadata, type Desktop3pMetadataEntry,
 } from "./desktop-3p-library";
 export { resolveDesktop3pConfigLibraryPath, type Desktop3pConfigLibraryOptions } from "./desktop-3p-library";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, lstatSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, lstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile, readConfigDiagnostics, withConfigMutationLockSync } from "../config";
-import { atomicWriteFileNoFollow } from "../config/atomic-write";
+import { atomicWriteFileNoFollow, atomicWriteFileStreamed } from "../config/atomic-write";
 import { claudeDesktopIntegrationEnabled } from "../codex/desired-state";
 import type { OcxClaudeDesktopProfile } from "../types";
 import {
   reconcileDesktopProfile,
   renderDesktopProfile,
   validDateAlias,
+  legacyDesktopProfileWireAlias,
   type DesktopProfileModel,
 } from "./desktop-profile";
 import { nativeOpenAiContextWindow, type NativeContextLimitsInput } from "../codex/catalog";
 import { localAdmissionToken, localInferenceDestination } from "../lib/local-destinations";
 import { assertDesktop3pModelsValid } from "./desktop-3p-guard";
+import { filterDesktopModelsByVisibility, readDesktopModelVisibility, type DesktopModelVisibility } from "./desktop-model-visibility";
 import { claudeSurfaceSupportsOneMillion, ONE_MILLION } from "./long-context";
 
 export interface Desktop3pModelEntry {
@@ -168,9 +171,11 @@ function collectDesktop3pModels(
   routedModels: Array<Desktop3pRoutedModel>,
   profile?: OcxClaudeDesktopProfile,
   nativeContextCap?: NativeContextLimitsInput,
-): { models: Desktop3pModelEntry[]; registry: Map<string, string>; realAnthropicIds: Set<string> } {
+): { models: Desktop3pModelEntry[]; routes: string[]; registry: Map<string, string>; realAnthropicIds: Set<string> } {
   const registry = new Map<string, string>();
   const models: Desktop3pModelEntry[] = [];
+  // routes[i] is the route models[i] serves; visibility filters by route, never by alias.
+  const routes: string[] = [];
   const candidates: Desktop3pRoutedModel[] = [
     // Native candidates carry their real context window from the same accessor the
     // Desktop DTO uses, so a native 1M/372k model resolves identically in the written
@@ -222,8 +227,9 @@ function collectDesktop3pModels(
         ...(model.isFamilyDefault ? { isFamilyDefault: true } : {}),
         ...(model.supports1m ? { supports1m: true, prefer1m: true } : {}),
       });
+      routes.push(model.route);
     }
-    // Hash aliases from both pre-profile generations are compatibility-only and can
+    // Previous profile IDs and both hash generations are compatibility-only and can
     // collide. Bind them in stable route order so changing a family default or
     // rendered ordering can never silently rebind an old Desktop id.
     for (const model of [...rendered].sort((a, b) => a.route.localeCompare(b.route))) {
@@ -231,7 +237,8 @@ function collectDesktop3pModels(
       const providerEnd = model.route.indexOf("/");
       const provider = model.route.slice(0, providerEnd);
       const id = model.route.slice(providerEnd + 1);
-      for (const legacy of [desktop3pAlias(provider, id), legacyDesktop3pAlias(provider, id)]) {
+      const storedAlias = reconciled.assignments[model.route]!.alias;
+      for (const legacy of [legacyDesktopProfileWireAlias(storedAlias), desktop3pAlias(provider, id), legacyDesktop3pAlias(provider, id)]) {
         if (realAnthropicIds.has(legacy)) {
           console.warn(`[opencodex] Claude Desktop legacy alias ${legacy} for ${model.route} conflicts with a real Anthropic model; ignoring the alias`);
           continue;
@@ -245,7 +252,7 @@ function collectDesktop3pModels(
       }
     }
     desktop3pAliasesByRoute = aliasesByRoute;
-    return { models, registry, realAnthropicIds };
+    return { models, routes, registry, realAnthropicIds };
   }
 
   const aliasesByRoute = new Map<string, string>();
@@ -269,6 +276,7 @@ function collectDesktop3pModels(
         ...(supports1m.supports1m ? { prefer1m: true as const } : {}),
       });
       emittedNames.add(alias);
+      routes.push(route);
       aliasesByRoute.set(route, alias);
       continue;
     }
@@ -297,12 +305,13 @@ function collectDesktop3pModels(
       ...supports1m,
       ...(supports1m.supports1m ? { prefer1m: true as const } : {}),
     });
+    routes.push(route);
     aliasesByRoute.set(route, alias);
   }
 
   if (models[0]) models[0].isFamilyDefault = true;
   desktop3pAliasesByRoute = aliasesByRoute;
-  return { models, registry, realAnthropicIds };
+  return { models, routes, registry, realAnthropicIds };
 }
 
 /** Build and install the registry used to decode Desktop aliases. */
@@ -325,6 +334,11 @@ export interface Desktop3pModelOptions {
    * (`supports1m`) but no longer defaults to it (`prefer1m` dropped).
    */
   preferOneMillion?: boolean;
+  /**
+   * Rows Desktop lists (#7702). Filters only the emitted list: the decode registry keeps every
+   * route so a running session holding a just-hidden alias still routes.
+   */
+  visibility?: DesktopModelVisibility;
 }
 
 export function generateDesktop3pModels(
@@ -334,15 +348,25 @@ export function generateDesktop3pModels(
   nativeContextCap?: NativeContextLimitsInput,
   options: Desktop3pModelOptions = {},
 ): Desktop3pModelEntry[] {
-  const { models, registry, realAnthropicIds } = collectDesktop3pModels(nativeSlugs, routedModels, profile, nativeContextCap);
+  const { models: all, routes, registry, realAnthropicIds } = collectDesktop3pModels(nativeSlugs, routedModels, profile, nativeContextCap);
   desktop3pRegistry = registry;
   desktop3pRealAnthropicIds = realAnthropicIds;
+  let models = filterDesktopModelsByVisibility(all, routes, options.visibility);
+  if (models.length === 0 && all.length > 0) {
+    // An empty static list leaves Desktop with no usable picker. The dashboard refuses to save
+    // such a selection; this covers selections whose every model has since disappeared.
+    console.warn("[opencodex] Claude Desktop model visibility hides every available model; listing all models instead");
+    models = all;
+  }
   return options.preferOneMillion === false ? models.map(({ prefer1m: _prefer1m, ...model }) => model) : models;
 }
 
 /** The Desktop model options a config asks for (one place, so writer and export agree). */
-export function desktop3pModelOptions(claudeCode: { contextAccounting?: string } | undefined): Desktop3pModelOptions {
-  return { preferOneMillion: claudeCode?.contextAccounting !== "200k" };
+export function desktop3pModelOptions(
+  claudeCode: { contextAccounting?: string; desktopModelVisibility?: unknown } | undefined,
+): Desktop3pModelOptions {
+  const visibility = readDesktopModelVisibility(claudeCode);
+  return { preferOneMillion: claudeCode?.contextAccounting !== "200k", ...(visibility ? { visibility } : {}) };
 }
 
 /** Resolve an alias using the most recently generated Desktop model registry. */
@@ -360,6 +384,11 @@ export function isKnownDesktop3pModelId(id: string): boolean {
   return desktop3pRegistry.has(id) || desktop3pRealAnthropicIds.has(id);
 }
 
+/** Real catalog IDs retain identity even when their spelling resembles an alias. */
+export function isRealDesktop3pModelId(id: string): boolean {
+  return desktop3pRealAnthropicIds.has(id);
+}
+
 /** Only missing IDs in the emitted Desktop namespaces are managed-alias errors. */
 export function isUnresolvedDesktop3pAlias(id: string): boolean {
   if (isKnownDesktop3pModelId(id)) return false;
@@ -369,12 +398,19 @@ export function isUnresolvedDesktop3pAlias(id: string): boolean {
   if (isKnownDesktop3pModelId(base)) return false;
   return validDateAlias(base)
     || /^claude-opus-4-(?:8-)?[a-z][a-z0-9]{2}$/.test(base)
-    || /^claude-opus-4-8-p[0-9a-z]{3}$/.test(base);
+    || /^claude-(?:opus-4-8|fable-5)-p[0-9a-z]{3}$/.test(base);
 }
 
 /** Alias selected by the installed profile registry, falling back to the legacy hash shape. */
 export function activeDesktop3pAlias(provider: string, modelId: string): string {
   return desktop3pAliasesByRoute.get(`${provider}/${modelId}`) ?? desktop3pAlias(provider, modelId);
+}
+
+/** Discovery cannot offer a skipped alias or one owned by a different route. */
+export function resolvableDesktop3pAlias(provider: string, modelId: string): string | undefined {
+  if (provider === "anthropic" && modelId.startsWith("claude-")) return modelId;
+  const alias = activeDesktop3pAlias(provider, modelId);
+  return resolveDesktop3pAlias(alias) === `${provider}/${modelId}` ? alias : undefined;
 }
 
 /**
@@ -476,7 +512,7 @@ export function inspectDesktop3pConfigLibrary(
   let profile: Record<string, unknown>;
   let fingerprint: string;
   try {
-    const source = readFileSync(selectedProfilePath, "utf8");
+    const source = readDesktopLibraryText(selectedProfilePath);
     const parsed = JSON.parse(source) as unknown;
     if (!isRecord(parsed)) return { kind: "broken", libraryPath, selectedProfilePath, appliedId, residualPaths, ownedProfileActive };
     profile = parsed;
@@ -627,13 +663,24 @@ function removeDesktop3pStandardPivotLocal(
     if (targetIds.length === 0) return { ok: true, changed: false, kind: "noop", libraryPath: inspected.libraryPath };
 
     let metadataAfterPivot = metadata;
+    let standardPath: string | undefined;
+    let pivotMetadataJson: string | undefined;
     if (selectedOwnedGatewayActive) {
       const standardId = randomUUID();
-      const standardPath = profilePath(inspected.libraryPath, standardId);
-      atomicWriteFile(standardPath, "{}\n");
+      standardPath = profilePath(inspected.libraryPath, standardId);
       const standardEntry: Desktop3pMetadataEntry = { id: standardId, name: "opencodex-standard" };
       metadataAfterPivot = { ...metadata, appliedId: standardId, entries: [...metadata.entries, standardEntry] };
-      atomicWriteFile(metadataPath, JSON.stringify(metadataAfterPivot, null, 2) + "\n");
+      pivotMetadataJson = serializeDesktopLibraryJson(metadataAfterPivot);
+    }
+    // Bound the final metadata before any unlink so a size refusal cannot strand
+    // a row pointing at an already-deleted profile.
+    const removalMetadataJson = serializeDesktopLibraryJson({
+      ...metadataAfterPivot,
+      entries: metadataAfterPivot.entries.filter(entry => !targetIds.includes(entry.id)),
+    });
+    if (standardPath !== undefined && pivotMetadataJson !== undefined) {
+      atomicWriteFile(standardPath, "{}\n");
+      atomicWriteFile(metadataPath, pivotMetadataJson);
     }
 
     const residualPaths: string[] = [];
@@ -659,10 +706,7 @@ function removeDesktop3pStandardPivotLocal(
     }
     // Do not leave a metadata row pointing at a deleted profile. For a foreign
     // selection this only removes proven opencodex residues; appliedId is kept.
-    atomicWriteFile(
-      metadataPath,
-      JSON.stringify({ ...metadataAfterPivot, entries: metadataAfterPivot.entries.filter(entry => !targetIds.includes(entry.id)) }, null, 2) + "\n",
-    );
+    atomicWriteFile(metadataPath, removalMetadataJson);
     return { ok: true, changed: true, kind: "removed", libraryPath: inspected.libraryPath };
   } catch (error) {
     return { ok: false, changed: false, kind: "write_failed", libraryPath: inspected.libraryPath, reason: desktopMutationFailureReason(error) };
@@ -709,7 +753,7 @@ export function writeDesktop3pConfig(
         const metadata = parseMetadata(join(inspected.libraryPath, "_meta.json"));
         if (!isOwnedDesktopGatewayEntry(metadata.entries.find(entry => entry.id === inspected.appliedId))) return refused;
         try {
-          const selected = JSON.parse(readFileSync(inspected.selectedProfilePath, "utf8")) as Record<string, unknown>;
+          const selected = JSON.parse(readDesktopLibraryText(inspected.selectedProfilePath)) as Record<string, unknown>;
           mode = selected.modelDiscoveryEnabled !== true ? "static"
             : Array.isArray(selected.inferenceModels) ? "hybrid" : "discovery";
         } catch { return refused; }
@@ -786,6 +830,7 @@ function desktopRefreshPathsSafe(libraryPath: string, configPath?: string): bool
   } catch { return false; }
 }
 
+/** Publish a gateway profile from a verified snapshot, rolling it back if metadata fails. */
 function writeDesktop3pConfigWithGenerator(
   generate: () => object,
   refreshOnly?: { requiredId: string; expectedFingerprint: string; admit: () => boolean },
@@ -814,8 +859,8 @@ function writeDesktop3pConfigWithGenerator(
       : [...metadata.entries, entry];
 
     const generated = generate();
-    const preserved = readDesktopProfileForeignKeys(configPath);
-    const configJson = JSON.stringify({ ...preserved, ...generated }, null, 2) + "\n";
+    const previous = readDesktopProfileSnapshot(configPath);
+    const configJson = serializeDesktopLibraryJson({ ...previous.foreign, ...generated });
     const fingerprint = createHash("sha256").update(configJson).digest("hex").slice(0, 16);
     if (refreshOnly) {
       atomicWriteFileNoFollow(configPath, configJson, undefined, {
@@ -825,7 +870,7 @@ function writeDesktop3pConfigWithGenerator(
             const freshMetadata = parseMetadata(metadataPath);
             if (freshMetadata.appliedId !== refreshOnly.requiredId
               || !isOwnedDesktopGatewayEntry(freshMetadata.entries.find(entry => entry.id === refreshOnly.requiredId))
-              || createHash("sha256").update(readFileSync(configPath)).digest("hex").slice(0, 16) !== refreshOnly.expectedFingerprint) {
+              || createHash("sha256").update(readDesktopLibraryBytes(configPath)).digest("hex").slice(0, 16) !== refreshOnly.expectedFingerprint) {
               throw new Error();
             }
           } catch { throw new Error("desktop_refresh_only_skipped"); }
@@ -833,12 +878,32 @@ function writeDesktop3pConfigWithGenerator(
       });
       return { written: true, path: configPath, fingerprint };
     }
-    const { backupPath } = atomicReplaceDesktopConfig(configPath, configJson);
+    const metadataJson = serializeDesktopLibraryJson({ ...metadata, appliedId: id, entries });
+    atomicReplaceDesktopConfig(configPath, configJson, previous.bytes);
     try {
-      atomicWriteFile(metadataPath, JSON.stringify({ ...metadata, appliedId: id, entries }, null, 2) + "\n");
+      atomicWriteFile(metadataPath, metadataJson);
     } catch (metaError) {
-      // Rollback: restore the backed-up config if metadata write fails.
-      if (backupPath && existsSync(backupPath)) copyFileSync(backupPath, configPath);
+      // Roll back from the verified bytes in memory: reopening the backup could meet a swapped
+      // entry and leave the new profile beside the old metadata. A profile this call created is
+      // unreferenced once metadata failed, so remove it rather than orphan one per retry.
+      // Rollback is ownership-aware: it acts only while the live profile still holds the bytes
+      // this call published, checked by the same comparison that guarded publication.
+      const base = metaError instanceof Error ? metaError.message : String(metaError);
+      const published = Buffer.from(configJson);
+      let owned = false;
+      const stillOwned = () => { owned = false; assertDesktopProfileUnchanged(configPath, published); owned = true; };
+      try {
+        stillOwned();
+        if (previous.bytes !== undefined) writeDesktopConfigBytes(configPath, previous.bytes, stillOwned);
+        else unlinkSync(configPath);
+      } catch (rollbackError) {
+        if (!owned) {
+          // Another writer replaced the profile after publication; its bytes win over our rollback.
+          throw new Error(`${base} (profile rollback skipped: profile changed after publish)`, { cause: metaError });
+        }
+        const detail = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        throw new AggregateError([metaError, rollbackError], `${base} (profile rollback also failed: ${detail})`, { cause: metaError });
+      }
       throw metaError;
     }
     return { written: true, path: configPath, fingerprint };
@@ -848,14 +913,36 @@ function writeDesktop3pConfigWithGenerator(
   }
 }
 
-/** Backup an existing owned config then atomically replace it. Exported for failure-path tests. */
+/**
+ * Compare the live profile with the caller's verified bytes before backup and before replacement.
+ * Refuse drift without retrying; backup and rollback continue to use the original verified bytes.
+ * `previous` is undefined only for an absent profile, which leaves any older backup alone.
+ * Exported for failure-path tests.
+ */
 export function atomicReplaceDesktopConfig(
   path: string,
   content: string,
-  writer: (path: string, content: string) => void = atomicWriteFile,
+  previous: Buffer | undefined,
+  writer: typeof atomicWriteFileNoFollow = atomicWriteFileNoFollow,
 ): { backupPath?: string } {
+  assertDesktopLibraryTextSize(content);
+  const validateBeforeRename = () => assertDesktopProfileUnchanged(path, previous);
+  validateBeforeRename();
   const backupPath = `${path}.bak`;
-  if (existsSync(path)) copyFileSync(path, backupPath);
-  writer(path, content);
-  return existsSync(backupPath) ? { backupPath } : {};
+  if (previous !== undefined) writeDesktopConfigBytes(backupPath, previous);
+  writer(path, content, undefined, { validateBeforeRename });
+  return previous === undefined ? {} : { backupPath };
+}
+
+/** Single compare-and-swap check: the live profile must still hold `expected` (undefined = absent). */
+function assertDesktopProfileUnchanged(path: string, expected: Buffer | undefined): void {
+  const current = readOptionalDesktopLibraryBytes(path);
+  if (expected === undefined ? current !== undefined : current === undefined || !expected.equals(current)) {
+    throw new Error("desktop_profile_changed");
+  }
+}
+
+/** Publish the verified bytes without reopening the source or decoding its backup contents. */
+function writeDesktopConfigBytes(path: string, bytes: Buffer, validateBeforeRename?: () => void): void {
+  atomicWriteFileStreamed(path, descriptor => { writeFileSync(descriptor, bytes); }, validateBeforeRename ? { validateBeforeRename } : {});
 }

@@ -73,16 +73,49 @@ POSIX에서는 launch proof 생성 도구가 있으면 셸에서 export한 Anthr
 보존합니다. proof를 생성할 수 없거나 Windows에서 직접 실행하면 신뢰되지 않은
 Anthropic 환경 설정을 제거하는 기존 번들 CLI 동작을 유지합니다.
 
-macOS와 Linux에서 데스크톱 앱이 번들 프록시를 실행하는 것으로 확인되면,
-`ocx status`에 `Runtime supervisor: OpenCodex Desktop`이 표시됩니다.
-기록된 소유권이 없어도 이 관계를 확인할 수 있습니다. 백그라운드 서비스를
+macOS, Linux, Windows에서 데스크톱 앱이 번들 프록시를 실행하는 것으로 확인되면,
+`ocx status`와 `ocx doctor`가 OpenCodex Desktop을 감독자로 표시합니다.
+`ocx status`에는 `Runtime supervisor: OpenCodex Desktop`이 표시되며, 두 명령 모두
+해당 런타임에 CLI 서비스 복구를 권하지 않습니다. 기록된 소유권이 없어도 이 관계를
+확인할 수 있습니다. macOS와 Linux에서는 백그라운드 서비스를
 설치하는 대신 OpenCodex 메뉴에서 **Start at Login**을 켜세요. 앱의 로그인
 등록이 확인되어야 재시작 후 보호가 적용됩니다. 등록을 확인할 수 없으면
 status에 표시되는 데스크톱 안내를 따르세요. 실행 관계 확인은 소유권을 생성하지 않습니다.
+이때 시작 안전 페이지의 데스크톱 앱 행에는 **실행 중 · 로그인 시 시작 미확인**이 표시됩니다.
+macOS에서 메뉴의 **Start at Login** 항목은 시작 안전 페이지도 같은 등록을 확인할 때만
+체크됩니다. 그렇지 않으면 체크가 해제된 채 이유가 라벨에 붙습니다. **disabled by macOS**는
+시스템 설정 → 일반 → 로그인 항목 및 확장 프로그램을 열며, 거기서 OpenCodex가 로그인 시
+열리도록 허용하면 됩니다. **another OpenCodex copy**는 로그인 항목이 다른 앱 사본의 것이라는
+뜻이니 그 사본에서 끄세요. **registered app is missing**은 로그인 항목이 더 이상 없는 앱을
+가리킨다는 뜻이니 `~/Library/LaunchAgents/OpenCodex.plist`를 지우고 항목을 다시 켜세요.
+**status unknown**은 등록을 읽지 못했다는 뜻입니다. 앱이 프록시를 실행하는 동안 시작 안전 페이지는
+백그라운드 서비스 설치를 막아 둡니다. 서비스를 대신 쓰려면 OpenCodex를 종료하고
+터미널에서 `ocx service install`을 실행하세요. Codex 런처 shim은 이 페이지에서 설치할 수 있습니다.
+Codex를 실행할 때 프록시가 없으면 번들 CLI는 독립적으로 확인된 Desktop의 복구를 기다립니다.
+기록된 소유 정보가 없어도 적용됩니다. 확인된 Desktop이 프록시를 중지했거나 복구 상태를 검증할 수
+없으면 오류를 알립니다. 다만 플랫폼이 복구 검증 자체를 지원하지 않을 때는 기록된 소유 정보와
+실행 중인 앱이 기존의 한정된 대기를 그대로 허용합니다. 프로세스 이름이나 검색용 파일만으로는 일반 CLI 시작을 막지 않습니다.
+macOS에서 앱이 종료돼 있고 기록된 소유 정보가 유효한 **Start at Login** 등록과 일치하면 앱을 엽니다.
+자동으로 다시 열 때는 그 등록에 기록된 앱
+번들 경로를 사용하고, 번들이 선언한 주 실행 파일이 등록된 Desktop 실행 파일과 같은지 확인합니다.
+등록이 없거나 오래됐거나 서로 맞지 않으면 OpenCodex를 직접 여세요. 번들 식별자가 같은 다른 사본을
+대신 고르지 않습니다.
+shim이 "활성화 미확인"으로 보이면 셸 시작 파일의 다른 PATH 설정 뒤에
+`. ~/.opencodex/codex-shell-env.sh`를 추가하세요.
+
+복구 검증은 macOS/Linux에서 같은 설치의 번들 CLI와 보호된 시스템 Debian 설치를 지원합니다.
+예전에 npm으로 만든 shim은 별도 Bun/CLI 경로를 고정하여 Desktop의 터미널 명령 전달을 거치지
+않을 수 있습니다. 이 진입점에서는 공식 서명된 사본을 포함한 macOS/Windows Desktop이나 임의의
+사용자별 Linux 사본을 검증할 수 없습니다. Desktop의 Startup 페이지에서 shim을 다시 만들거나
+번들 CLI를 실행하세요. Windows에서는 복구 증명에 필요한 실제 실행 이미지의 동일성을 아직 확인할
+수 없어, 같은 설치의 앱이 실행 중이면 복구 점수를 인정하지 않고 기록된 소유 정보가 없으면
+디스크 파일의 서명이 유효하더라도 CLI 프록시를 띄우는 대신 오류를 알립니다. 기록된 소유 정보가
+있고 앱이 실행 중이면 CLI는 Desktop 프록시를 기다리는 기존의 한정된 대기를 유지합니다.
 
 번들 CLI 경로는 macOS에서 `/Applications/OpenCodex.app/Contents/MacOS/ocx`,
 Linux deb 패키지에서 `/usr/bin/ocx`입니다. 해당 실행 파일에 `status`를 붙여
-앱의 프록시 상태를 확인할 수 있습니다. Windows에서는 supervision 감지를 지원하지 않습니다.
+앱의 프록시 상태를 확인할 수 있습니다. Windows에서도 프록시 자식 프로세스가 실행 중이면 감독 관계를 확인하지만,
+**Start at Login**은 검증하지 않으며 Desktop에 시작 안전 보호를 인정하지 않습니다.
 
 CLI가 Desktop의 프록시 감독을 감지하면 `ocx service install`, `repair`, `start`,
 `restart`는 서비스를 변경하기 전에 중단됩니다. 기록된 소유권이나 확인된 로그인
@@ -99,9 +132,8 @@ PATH CLI도 `ocx restart`로 앱의 프록시를 자기 설치의 런타임으�
 있습니다. 계속 중지하려면 트레이의 **Stop proxy** 또는 **Quit**을 사용하세요.
 일반 stop은 이 안내를 stderr에 표시하고, `ocx stop --json`은 감독 검사와 안내를 생략합니다.
 
-이 가드는 현재 CLI와 런타임이 제공하는 조기 경고입니다. 이전 버전에는 없을 수 있으며
-Windows에서는 감독 검사를 지원하지 않습니다. 검사 중 Desktop을 발견했지만 확인을
-완료하지 못한 경우에도 작업을 차단합니다. 한 번 차단되면 이후의 불확실한 검사로는
+이 가드는 현재 CLI와 런타임이 제공하는 조기 경고입니다. 이전 버전에는 없을 수 있습니다.
+검사 중 Desktop을 발견했지만 확인을 완료하지 못한 경우에도 작업을 차단합니다. 한 번 차단되면 이후의 불확실한 검사로는
 해제되지 않으며, Desktop 감독이 없다는 사실이 확인되어야 합니다. 앞서 Desktop을
 발견하지 않았다면 불확실하거나 지원되지 않는 검사는 기존 명령 동작을 유지합니다.
 기록된 소유권에 따른 기존 거부 검사는 별도로 적용됩니다.

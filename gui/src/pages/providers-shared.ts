@@ -11,10 +11,13 @@ export interface ProvidersConfig {
     liveModels?: boolean;
     upstreamHttpVersion?: "auto" | "http1.1" | "h1" | "http2" | "h2";
     reasoningWireFormat?: "gateway-object";
+    preserveResponsesReasoningContent?: boolean;
     authMode?: string;
+    anthropicOAuthInstance?: "anthropic2";
     keyOptional?: boolean;
     disabled?: boolean;
     initialModelSelection?: { status: "pending" | "ready" | "all-off"; modelCount?: number };
+    discovery?: import("../models-groups").ProviderDiscoverySummary;
     note?: string;
     codexAccountMode?: "direct" | "pool";
     xaiResponsesOptInState?: boolean | "mixed";
@@ -63,6 +66,8 @@ const OAUTH_LABELS: Record<string, string> = {
   // it is a deprecated alias that startup migration rewrites to `devin`, so a
   // stored row can never reach this map under the old id.
   devin: "Devin",
+  "dsh-account": "DeepSeek Account (DSH)",
+  "workbuddy-ai": "WorkBuddy AI",
 };
 
 export const oauthLabel = (id: string) => OAUTH_LABELS[id] ?? id;
